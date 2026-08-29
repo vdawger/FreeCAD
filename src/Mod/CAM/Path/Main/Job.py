@@ -254,6 +254,10 @@ class ObjectJob:
 
         obj.GeometryTolerance = Path.Preferences.defaultGeometryTolerance()
 
+        from Path.Post.ExportArray import ensure_job_properties
+
+        ensure_job_properties(obj)
+
         self.setupOperations(obj)
         self.setupSetupSheet(obj)
         self.setupBaseModel(obj, models)
@@ -601,6 +605,10 @@ class ObjectJob:
             )
             obj.PostProcessorPropertyOverrides = "{}"
 
+        from Path.Post.ExportArray import ensure_job_properties
+
+        ensure_job_properties(obj)
+
         for n in self.propertyEnumerations():
             setattr(obj, n[0], n[1])
 
@@ -626,6 +634,24 @@ class ObjectJob:
             processor = PostProcessorFactory.get_post_processor(obj, obj.PostProcessor)
             self.tooltip = processor.tooltip
             self.tooltipArgs = processor.tooltipArgs
+
+        if prop == "ExportArrayEnabled":
+            from Path.Post.ExportArray import ensure_job_properties, update_preview
+
+            ensure_job_properties(obj)
+            update_preview(obj)
+        elif prop in ("ExportArrayCountX", "ExportArrayCountY"):
+            from Path.Post.ExportArray import grid_x, grid_y, normalize_mask, update_preview
+
+            if hasattr(obj, "ExportArrayMask"):
+                new_mask = normalize_mask(obj.ExportArrayMask, grid_x(obj), grid_y(obj))
+                if obj.ExportArrayMask != new_mask:
+                    obj.ExportArrayMask = new_mask
+            update_preview(obj)
+        elif prop in ("ExportArrayOffset", "ExportArraySwapDirection", "ExportArrayMask"):
+            from Path.Post.ExportArray import update_preview
+
+            update_preview(obj)
 
     def baseObject(self, obj, base):
         """Return the base object, not its clone."""
@@ -762,6 +788,9 @@ class ObjectJob:
         if getattr(obj, "Operations", None):
             # obj.Path = obj.Operations.Path
             self.getCycleTime()
+            from Path.Post.ExportArray import update_preview
+
+            update_preview(obj)
             if hasattr(obj, "PathChanged"):
                 obj.PathChanged = True
 

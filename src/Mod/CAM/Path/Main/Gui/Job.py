@@ -311,6 +311,16 @@ class ViewProvider:
 
     def updateData(self, obj, prop):
         Path.Log.track(obj.Label, prop)
+        if prop in (
+            "Operations",
+            "ExportArrayEnabled",
+            "ExportArrayCountX",
+            "ExportArrayCountY",
+            "ExportArrayOffset",
+        ):
+            from Path.Post.ExportArray import update_preview
+
+            update_preview(obj)
         # make sure the resource view providers are setup properly
         if prop == "Model" and self.obj.Model:
             for base in self.obj.Model.Group:
@@ -996,6 +1006,7 @@ class TaskPanel:
                 self.form.operationsList.invisibleRootItem().child(i).data(self.DataObject, 0)
                 for i in range(self.form.operationsList.topLevelItemCount())
             ]
+            self._getExportArrayFields()
             try:
                 self.obj.SplitOutput = self.form.splitOutput.isChecked()
                 self.obj.OrderOutputBy = str(self.form.orderBy.currentData())
@@ -1126,6 +1137,7 @@ class TaskPanel:
         self.form.postProcessorOutputFile.setText(self.obj.PostProcessorOutputFile)
         self.selectComboBoxText(self.form.postProcessor, self.obj.PostProcessor)
         self.form.postProcessorArguments.setText(self.obj.PostProcessorArgs)
+        self._setExportArrayFields()
         # self.obj.Proxy.onChanged(self.obj, "PostProcessor")
         self.updateTooltips()
 
@@ -1181,6 +1193,168 @@ class TaskPanel:
         self.setupGlobal.setFields()
         self.setupOps.setFields()
         self.populateMachineCombo()
+
+    def _setupExportArrayUi(self):
+        """Add Export Array controls to the Output tab (not in the compiled .ui)."""
+        if hasattr(self.form, "exportArrayEnabled"):
+            return
+        tab = getattr(self.form, "tabOutput", None)
+        if tab is None:
+            return
+        grid = tab.layout()
+        if grid is None:
+            return
+
+        group = QtGui.QGroupBox(translate("CAM_Job", "Export Array"))
+        form = QtGui.QFormLayout(group)
+
+        self.form.exportArrayEnabled = QtGui.QCheckBox(
+            translate("CAM_Job", "Array operations")
+        )
+        self.form.exportArrayEnabled.setToolTip(
+            translate(
+                "CAM_Job",
+                "Array every operation across a grid. Checked cells below are "
+                "shown in the 3D view and posted, in operation order.",
+            )
+        )
+        form.addRow(self.form.exportArrayEnabled)
+
+        self.form.exportArrayCountX = QtGui.QSpinBox()
+        self.form.exportArrayCountX.setRange(0, 999)
+        self.form.exportArrayCountX.setToolTip(
+            translate(
+                "CAM_Job",
+                "Extra copies in X, same as CAM Array CopiesX. Total columns = this + 1",
+            )
+        )
+        form.addRow(translate("CAM_Job", "Copies X"), self.form.exportArrayCountX)
+
+        self.form.exportArrayCountY = QtGui.QSpinBox()
+        self.form.exportArrayCountY.setRange(0, 999)
+        self.form.exportArrayCountY.setToolTip(
+            translate(
+                "CAM_Job",
+                "Extra copies in Y, same as CAM Array CopiesY. Total rows = this + 1",
+            )
+        )
+        form.addRow(translate("CAM_Job", "Copies Y"), self.form.exportArrayCountY)
+
+        self.form.exportArrayOffsetX = QtGui.QDoubleSpinBox()
+        self.form.exportArrayOffsetX.setRange(-1e6, 1e6)
+        self.form.exportArrayOffsetX.setDecimals(3)
+        self.form.exportArrayOffsetX.setSuffix(" mm")
+        form.addRow(translate("CAM_Job", "X pitch"), self.form.exportArrayOffsetX)
+
+        self.form.exportArrayOffsetY = QtGui.QDoubleSpinBox()
+        self.form.exportArrayOffsetY.setRange(-1e6, 1e6)
+        self.form.exportArrayOffsetY.setDecimals(3)
+        self.form.exportArrayOffsetY.setSuffix(" mm")
+        form.addRow(translate("CAM_Job", "Y pitch"), self.form.exportArrayOffsetY)
+
+        self.form.exportArraySwapDirection = QtGui.QCheckBox(
+            translate("CAM_Job", "Walk X before Y")
+        )
+        self.form.exportArraySwapDirection.setToolTip(
+            translate(
+                "CAM_Job",
+                "Unchecked: column by column (Y then next X). Checked: row by row.",
+            )
+        )
+        form.addRow(self.form.exportArraySwapDirection)
+
+        from Path.Post.Gui.DlgExportArray import ExportArrayCellGrid
+
+        self.form.exportArrayGrid = ExportArrayCellGrid()
+        self.form.exportArrayGrid.maskChanged.connect(self._exportArrayMaskChanged)
+        form.addRow(self.form.exportArrayGrid)
+
+        # Insert above the WCS group (row 4) if possible.
+        grid.addWidget(group, 3, 0, 1, 3)
+
+        self.form.exportArrayEnabled.toggled.connect(self._exportArrayToggled)
+        self.form.exportArrayEnabled.toggled.connect(self.getFields)
+        self.form.exportArrayCountX.valueChanged.connect(self._exportArrayCountsChanged)
+        self.form.exportArrayCountY.valueChanged.connect(self._exportArrayCountsChanged)
+        self.form.exportArrayOffsetX.editingFinished.connect(self._exportArrayOffsetChanged)
+        self.form.exportArrayOffsetY.editingFinished.connect(self._exportArrayOffsetChanged)
+        self.form.exportArraySwapDirection.toggled.connect(self.getFields)
+        self._setExportArrayFields()
+
+    def _exportArrayToggled(self, checked):
+        widgets = [
+            self.form.exportArrayCountX,
+            self.form.exportArrayCountY,
+            self.form.exportArrayOffsetX,
+            self.form.exportArrayOffsetY,
+            self.form.exportArraySwapDirection,
+        ]
+        if hasattr(self.form, "exportArrayGrid"):
+            widgets.append(self.form.exportArrayGrid)
+        for w in widgets:
+            w.setEnabled(checked)
+
+    def _exportArrayCountsChanged(self):
+        self.getFields()
+        self._rebuildExportArrayGrid()
+
+    def _exportArrayOffsetChanged(self):
+        self.getFields()
+        if hasattr(self.form, "exportArrayGrid"):
+            self.form.exportArrayGrid.configure(self.obj)
+
+    def _exportArrayMaskChanged(self, mask):
+        if not self.obj or not hasattr(self.obj, "ExportArrayMask"):
+            return
+        if self.obj.ExportArrayMask != mask:
+            self.obj.ExportArrayMask = mask
+        from Path.Post.ExportArray import update_preview
+
+        update_preview(self.obj)
+
+    def _rebuildExportArrayGrid(self):
+        if not hasattr(self.form, "exportArrayGrid"):
+            return
+        self.form.exportArrayGrid.configure(self.obj)
+
+    def _setExportArrayFields(self):
+        if not hasattr(self.form, "exportArrayEnabled"):
+            return
+        from Path.Post.ExportArray import ensure_job_properties, copies_x, copies_y
+
+        ensure_job_properties(self.obj)
+        self.form.exportArrayEnabled.blockSignals(True)
+        self.form.exportArrayCountX.blockSignals(True)
+        self.form.exportArrayCountY.blockSignals(True)
+        self.form.exportArrayEnabled.setChecked(bool(self.obj.ExportArrayEnabled))
+        self.form.exportArrayCountX.setValue(copies_x(self.obj))
+        self.form.exportArrayCountY.setValue(copies_y(self.obj))
+        off = self.obj.ExportArrayOffset
+        self.form.exportArrayOffsetX.setValue(off.x)
+        self.form.exportArrayOffsetY.setValue(off.y)
+        self.form.exportArraySwapDirection.setChecked(bool(self.obj.ExportArraySwapDirection))
+        self.form.exportArrayEnabled.blockSignals(False)
+        self.form.exportArrayCountX.blockSignals(False)
+        self.form.exportArrayCountY.blockSignals(False)
+        self._rebuildExportArrayGrid()
+        self._exportArrayToggled(self.form.exportArrayEnabled.isChecked())
+
+    def _getExportArrayFields(self):
+        if not hasattr(self.form, "exportArrayEnabled"):
+            return
+        from Path.Post.ExportArray import ensure_job_properties
+
+        ensure_job_properties(self.obj)
+        self.obj.ExportArrayEnabled = self.form.exportArrayEnabled.isChecked()
+        self.obj.ExportArrayCountX = self.form.exportArrayCountX.value()
+        self.obj.ExportArrayCountY = self.form.exportArrayCountY.value()
+        z = self.obj.ExportArrayOffset.z
+        self.obj.ExportArrayOffset = FreeCAD.Vector(
+            self.form.exportArrayOffsetX.value(),
+            self.form.exportArrayOffsetY.value(),
+            z,
+        )
+        self.obj.ExportArraySwapDirection = self.form.exportArraySwapDirection.isChecked()
 
     def setPostProcessorOutputFile(self):
         from Path.Post.Utils import FilenameGenerator
@@ -1818,6 +1992,7 @@ class TaskPanel:
         self.form.postProcessorArguments.editingFinished.connect(self.getFields)
         self.form.postProcessorOutputFile.editingFinished.connect(self.getFields)
         self.form.postProcessorSetOutputFile.clicked.connect(self.setPostProcessorOutputFile)
+        self._setupExportArrayUi()
 
         # Workplan
         self.form.operationsList.itemSelectionChanged.connect(self.operationSelect)
