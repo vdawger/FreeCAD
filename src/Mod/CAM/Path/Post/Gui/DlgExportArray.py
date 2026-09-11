@@ -62,7 +62,7 @@ class ExportArrayCellGrid(QtGui.QWidget):
         self._job = job
         nx = ExportArray.grid_x(job)
         ny = ExportArray.grid_y(job)
-        if (nx, ny) != (self._nx, self._ny):
+        if (nx, ny) != (self._nx, self._ny) or len(self._boxes) != nx * ny:
             self._nx = nx
             self._ny = ny
             self._rebuild()

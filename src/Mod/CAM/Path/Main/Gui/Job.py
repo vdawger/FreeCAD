@@ -31,6 +31,7 @@ import FreeCADGui
 import Path
 import Path.Base.Gui.SetupSheet as PathSetupSheetGui
 import Path.Base.Gui.Theme as PathGuiTheme
+import Path.Base.Gui.Util as PathGuiUtil
 import Path.Base.Util as PathUtil
 import Path.GuiInit as PathGuiInit
 import Path.Main.Gui.JobCmd as PathJobCmd
@@ -1255,37 +1256,47 @@ class TaskPanel:
         )
         form.addRow(self.form.exportArrayEnabled)
 
-        self.form.exportArrayCountX = QtGui.QSpinBox()
-        self.form.exportArrayCountX.setRange(0, 999)
+        loader = FreeCADGui.UiLoader()
+
+        self.form.exportArrayCountX = loader.createWidget("Gui::IntSpinBox")
+        self.form.exportArrayCountX.setMinimum(0)
+        self.form.exportArrayCountX.setMaximum(999)
         self.form.exportArrayCountX.setToolTip(
             translate(
                 "CAM_Job",
-                "Extra copies in X, same as CAM Array CopiesX. Total columns = this + 1",
+                "Extra copies in X, same as CAM Array CopiesX. Total columns = this + 1. "
+                "Use the formula button to bind a VarSet.",
             )
         )
         form.addRow(translate("CAM_Job", "Copies X"), self.form.exportArrayCountX)
 
-        self.form.exportArrayCountY = QtGui.QSpinBox()
-        self.form.exportArrayCountY.setRange(0, 999)
+        self.form.exportArrayCountY = loader.createWidget("Gui::IntSpinBox")
+        self.form.exportArrayCountY.setMinimum(0)
+        self.form.exportArrayCountY.setMaximum(999)
         self.form.exportArrayCountY.setToolTip(
             translate(
                 "CAM_Job",
-                "Extra copies in Y, same as CAM Array CopiesY. Total rows = this + 1",
+                "Extra copies in Y, same as CAM Array CopiesY. Total rows = this + 1. "
+                "Use the formula button to bind a VarSet.",
             )
         )
         form.addRow(translate("CAM_Job", "Copies Y"), self.form.exportArrayCountY)
 
-        self.form.exportArrayOffsetX = QtGui.QDoubleSpinBox()
-        self.form.exportArrayOffsetX.setRange(-1e6, 1e6)
-        self.form.exportArrayOffsetX.setDecimals(3)
-        self.form.exportArrayOffsetX.setSuffix(" mm")
+        self.form.exportArrayOffsetX = loader.createWidget("Gui::QuantitySpinBox")
+        self.form.exportArrayOffsetX.setProperty("unit", "mm")
+        self.form.exportArrayOffsetX.setToolTip(
+            translate("CAM_Job", "Spacing between columns. Accepts values or expressions.")
+        )
         form.addRow(translate("CAM_Job", "X pitch"), self.form.exportArrayOffsetX)
 
-        self.form.exportArrayOffsetY = QtGui.QDoubleSpinBox()
-        self.form.exportArrayOffsetY.setRange(-1e6, 1e6)
-        self.form.exportArrayOffsetY.setDecimals(3)
-        self.form.exportArrayOffsetY.setSuffix(" mm")
+        self.form.exportArrayOffsetY = loader.createWidget("Gui::QuantitySpinBox")
+        self.form.exportArrayOffsetY.setProperty("unit", "mm")
+        self.form.exportArrayOffsetY.setToolTip(
+            translate("CAM_Job", "Spacing between rows. Accepts values or expressions.")
+        )
         form.addRow(translate("CAM_Job", "Y pitch"), self.form.exportArrayOffsetY)
+
+        self._bindExportArrayWidgets()
 
         self.form.exportArraySwapDirection = QtGui.QCheckBox(
             translate("CAM_Job", "Walk X before Y")
@@ -1304,6 +1315,26 @@ class TaskPanel:
         self.form.exportArrayGrid.maskChanged.connect(self._exportArrayMaskChanged)
         form.addRow(self.form.exportArrayGrid)
 
+        self.form.exportArrayToolChangeTime = loader.createWidget("Gui::QuantitySpinBox")
+        self.form.exportArrayToolChangeTime.setProperty("unit", "s")
+        self.form.exportArrayToolChangeTime.setToolTip(
+            translate(
+                "CAM_Job",
+                "Time added for each tool change, including loading the first tool. "
+                "Tool changes follow operation order, not the number of array parts.",
+            )
+        )
+        form.addRow(
+            translate("CAM_Job", "Tool change time"),
+            self.form.exportArrayToolChangeTime,
+        )
+
+        self.form.exportArrayJobTime = QtGui.QLabel()
+        self.form.exportArrayJobTime.setWordWrap(True)
+        self.form.exportArrayJobTime.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        form.addRow(self.form.exportArrayJobTime)
+        self._bindToolChangeTimeWidget()
+
         # Insert above the WCS group (row 4) if possible.
         grid.addWidget(group, 3, 0, 1, 3)
 
@@ -1311,10 +1342,88 @@ class TaskPanel:
         self.form.exportArrayEnabled.toggled.connect(self.getFields)
         self.form.exportArrayCountX.valueChanged.connect(self._exportArrayCountsChanged)
         self.form.exportArrayCountY.valueChanged.connect(self._exportArrayCountsChanged)
+        self.form.exportArrayCountX.editingFinished.connect(self._exportArrayCountsChanged)
+        self.form.exportArrayCountY.editingFinished.connect(self._exportArrayCountsChanged)
         self.form.exportArrayOffsetX.editingFinished.connect(self._exportArrayOffsetChanged)
         self.form.exportArrayOffsetY.editingFinished.connect(self._exportArrayOffsetChanged)
         self.form.exportArraySwapDirection.toggled.connect(self.getFields)
+        self.form.exportArrayToolChangeTime.editingFinished.connect(
+            self._exportArrayToolChangeTimeChanged
+        )
+        self._connectExportArrayFormulaSignals()
         self._setExportArrayFields()
+
+    def _bindExportArrayWidgets(self):
+        """Attach expression bindings so counts and pitches accept VarSet formulas."""
+        self._exportArrayBindings = [
+            FreeCADGui.ExpressionBinding(self.form.exportArrayCountX),
+            FreeCADGui.ExpressionBinding(self.form.exportArrayCountY),
+            FreeCADGui.ExpressionBinding(self.form.exportArrayOffsetX),
+            FreeCADGui.ExpressionBinding(self.form.exportArrayOffsetY),
+        ]
+        self._exportArrayBindings[0].bind(self.obj, "ExportArrayCountX")
+        self._exportArrayBindings[1].bind(self.obj, "ExportArrayCountY")
+        self._exportArrayBindings[2].bind(self.obj, "ExportArrayOffset.x")
+        self._exportArrayBindings[3].bind(self.obj, "ExportArrayOffset.y")
+        self._exportArrayOffsetX = PathGuiUtil.QuantitySpinBox(
+            self.form.exportArrayOffsetX, self.obj, "ExportArrayOffset.x"
+        )
+        self._exportArrayOffsetY = PathGuiUtil.QuantitySpinBox(
+            self.form.exportArrayOffsetY, self.obj, "ExportArrayOffset.y"
+        )
+
+    def _bindToolChangeTimeWidget(self):
+        from Path.Post.ExportArray import ensure_job_properties
+
+        ensure_job_properties(self.obj)
+        if not hasattr(self.form, "exportArrayToolChangeTime") or not hasattr(
+            self.obj, "ToolChangeTime"
+        ):
+            return
+        self._exportArrayToolChangeBinding = FreeCADGui.ExpressionBinding(
+            self.form.exportArrayToolChangeTime
+        )
+        self._exportArrayToolChangeBinding.bind(self.obj, "ToolChangeTime")
+        self._exportArrayToolChangeTime = PathGuiUtil.QuantitySpinBox(
+            self.form.exportArrayToolChangeTime, self.obj, "ToolChangeTime"
+        )
+
+    def _connectExportArrayFormulaSignals(self):
+        for widget in (
+            self.form.exportArrayCountX,
+            self.form.exportArrayCountY,
+            self.form.exportArrayOffsetX,
+            self.form.exportArrayOffsetY,
+            getattr(self.form, "exportArrayToolChangeTime", None),
+        ):
+            if widget is None:
+                continue
+            sig = getattr(widget, "showFormulaDialog", None)
+            if sig is None:
+                continue
+            try:
+                sig.connect(self._onExportArrayFormulaDialog)
+            except Exception:
+                pass
+
+    def _onExportArrayFormulaDialog(self, isOpen):
+        if not isOpen:
+            QtCore.QTimer.singleShot(0, self._refreshExportArrayLive)
+
+    def _refreshExportArrayLive(self):
+        if not self.obj:
+            return
+        try:
+            self.obj.recompute()
+        except Exception:
+            pass
+        self._setExportArrayFields()
+        from Path.Post.ExportArray import update_preview
+
+        update_preview(self.obj)
+
+    def _exportArrayHasExpression(self, prop):
+        return any(name == prop for name, _expr in self.obj.ExpressionEngine)
 
     def _exportArrayToggled(self, checked):
         widgets = [
@@ -1328,15 +1437,23 @@ class TaskPanel:
             widgets.append(self.form.exportArrayGrid)
         for w in widgets:
             w.setEnabled(checked)
+        self._updateJobTimeEstimate()
 
     def _exportArrayCountsChanged(self):
         self.getFields()
         self._rebuildExportArrayGrid()
+        self._updateJobTimeEstimate()
 
     def _exportArrayOffsetChanged(self):
         self.getFields()
-        if hasattr(self.form, "exportArrayGrid"):
-            self.form.exportArrayGrid.configure(self.obj)
+        if getattr(self, "_exportArrayOffsetX", None):
+            self._exportArrayOffsetX.updateWidget()
+            self._exportArrayOffsetY.updateWidget()
+        self._rebuildExportArrayGrid()
+        from Path.Post.ExportArray import update_preview
+
+        update_preview(self.obj)
+        self._updateJobTimeEstimate()
 
     def _exportArrayMaskChanged(self, mask):
         if not self.obj or not hasattr(self.obj, "ExportArrayMask"):
@@ -1346,6 +1463,22 @@ class TaskPanel:
         from Path.Post.ExportArray import update_preview
 
         update_preview(self.obj)
+        self._updateJobTimeEstimate()
+
+    def _exportArrayToolChangeTimeChanged(self):
+        self.getFields()
+        if getattr(self, "_exportArrayToolChangeTime", None):
+            self._exportArrayToolChangeTime.updateWidget()
+        self._updateJobTimeEstimate()
+
+    def _updateJobTimeEstimate(self):
+        if not hasattr(self.form, "exportArrayJobTime") or not self.obj:
+            return
+        from Path.Post.ExportArray import estimate_job_time, format_job_time_estimate
+
+        self.form.exportArrayJobTime.setText(
+            format_job_time_estimate(estimate_job_time(self.obj))
+        )
 
     def _rebuildExportArrayGrid(self):
         if not hasattr(self.form, "exportArrayGrid"):
@@ -1355,7 +1488,7 @@ class TaskPanel:
     def _setExportArrayFields(self):
         if not hasattr(self.form, "exportArrayEnabled"):
             return
-        from Path.Post.ExportArray import ensure_job_properties, copies_x, copies_y
+        from Path.Post.ExportArray import ensure_job_properties, copies_x, copies_y, offset_vector
 
         ensure_job_properties(self.obj)
         self.form.exportArrayEnabled.blockSignals(True)
@@ -1364,15 +1497,19 @@ class TaskPanel:
         self.form.exportArrayEnabled.setChecked(bool(self.obj.ExportArrayEnabled))
         self.form.exportArrayCountX.setValue(copies_x(self.obj))
         self.form.exportArrayCountY.setValue(copies_y(self.obj))
-        off = self.obj.ExportArrayOffset
-        self.form.exportArrayOffsetX.setValue(off.x)
-        self.form.exportArrayOffsetY.setValue(off.y)
+        if getattr(self, "_exportArrayOffsetX", None):
+            off = offset_vector(self.obj)
+            self._exportArrayOffsetX.updateWidget(off.x)
+            self._exportArrayOffsetY.updateWidget(off.y)
         self.form.exportArraySwapDirection.setChecked(bool(self.obj.ExportArraySwapDirection))
+        if getattr(self, "_exportArrayToolChangeTime", None):
+            self._exportArrayToolChangeTime.updateWidget()
         self.form.exportArrayEnabled.blockSignals(False)
         self.form.exportArrayCountX.blockSignals(False)
         self.form.exportArrayCountY.blockSignals(False)
         self._rebuildExportArrayGrid()
         self._exportArrayToggled(self.form.exportArrayEnabled.isChecked())
+        self._updateJobTimeEstimate()
 
     def _getExportArrayFields(self):
         if not hasattr(self.form, "exportArrayEnabled"):
@@ -1381,15 +1518,19 @@ class TaskPanel:
 
         ensure_job_properties(self.obj)
         self.obj.ExportArrayEnabled = self.form.exportArrayEnabled.isChecked()
-        self.obj.ExportArrayCountX = self.form.exportArrayCountX.value()
-        self.obj.ExportArrayCountY = self.form.exportArrayCountY.value()
-        z = self.obj.ExportArrayOffset.z
-        self.obj.ExportArrayOffset = FreeCAD.Vector(
-            self.form.exportArrayOffsetX.value(),
-            self.form.exportArrayOffsetY.value(),
-            z,
-        )
+        if not self._exportArrayHasExpression("ExportArrayCountX"):
+            self.obj.ExportArrayCountX = int(self.form.exportArrayCountX.value())
+        if not self._exportArrayHasExpression("ExportArrayCountY"):
+            self.obj.ExportArrayCountY = int(self.form.exportArrayCountY.value())
+        if getattr(self, "_exportArrayOffsetX", None):
+            if not self._exportArrayHasExpression("ExportArrayOffset.x"):
+                self._exportArrayOffsetX.updateProperty()
+            if not self._exportArrayHasExpression("ExportArrayOffset.y"):
+                self._exportArrayOffsetY.updateProperty()
         self.obj.ExportArraySwapDirection = self.form.exportArraySwapDirection.isChecked()
+        if getattr(self, "_exportArrayToolChangeTime", None):
+            if not self._exportArrayHasExpression("ToolChangeTime"):
+                self._exportArrayToolChangeTime.updateProperty()
 
     def setPostProcessorOutputFile(self):
         from Path.Post.Utils import FilenameGenerator

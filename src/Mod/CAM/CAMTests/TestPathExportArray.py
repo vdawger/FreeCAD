@@ -7,30 +7,43 @@ import Path
 from Path.Post.ExportArray import (
     ArrayedOperation,
     all_cells,
+    copy_count,
+    count_tool_changes,
     default_mask,
+    estimate_job_time,
     expand_operations,
+    format_duration,
+    format_job_time_estimate,
     is_cam_array_operation,
     is_enabled,
     mask_from_selected,
     mask_index,
     normalize_mask,
+    parse_cycle_time_seconds,
     selected_cells,
 )
 from CAMTests.PathTestUtils import PathTestBase
 
 
+class _FakeTC:
+    def __init__(self, number):
+        self.ToolNumber = number
+        self.Label = f"T{number}"
+
+
 class _FakeOp:
-    def __init__(self, name, path, active=True):
+    def __init__(self, name, path, active=True, cycle="00:01:00", tool=None):
         self.Name = name
         self.Label = name
         self.Path = Path.Path([Path.Command(line) for line in path.split("\n") if line])
         self.Active = active
-        self.ToolController = None
+        self.ToolController = _FakeTC(tool) if tool is not None else None
         self.CoolantMode = "None"
         self.Placement = FreeCAD.Placement()
         self.Proxy = None
         self.TypeId = "Path::FeaturePython"
         self.InList = []
+        self.CycleTime = cycle
 
     def isDerivedFrom(self, typ):
         return typ in ("Path::Feature", "Path::FeaturePython")
@@ -56,8 +69,10 @@ class _FakeJob:
         self.ExportArrayOffset = kwargs.get("offset", FreeCAD.Vector(10, 20, 0))
         self.ExportArraySwapDirection = kwargs.get("swap", False)
         self.ExportArrayMask = kwargs.get("mask", "")
+        self.ToolChangeTime = kwargs.get("tool_change", 30)
         self.Path = Path.Path()
         self.Operations = type("Ops", (), {"Group": kwargs.get("ops", [])})()
+        self.ExpressionEngine = []
 
 
 class TestPathExportArray(PathTestBase):
@@ -69,6 +84,33 @@ class TestPathExportArray(PathTestBase):
     def test_mask_index_row_major(self):
         # 3 columns, cell (col 2, row 1) -> index 1*3+2 = 5
         self.assertEqual(mask_index(2, 1, 3), 5)
+
+    def test_copies_and_offset_evaluate_expressions(self):
+        from Path.Post.ExportArray import copies_x, copies_y, grid_x, grid_y, offset_vector
+
+        class _Job:
+            ExportArrayEnabled = True
+            ExportArrayCountX = 0
+            ExportArrayCountY = 0
+            ExportArrayOffset = FreeCAD.Vector(0, 0, 0)
+            ExpressionEngine = [
+                ("ExportArrayCountX", "cx"),
+                ("ExportArrayCountY", "cy"),
+                ("ExportArrayOffset.x", "ox"),
+                ("ExportArrayOffset.y", "oy"),
+            ]
+
+            def evalExpression(self, expr):
+                return {"cx": 2, "cy": 1, "ox": 103.0, "oy": 52.0}[expr]
+
+        job = _Job()
+        self.assertEqual(copies_x(job), 2)
+        self.assertEqual(copies_y(job), 1)
+        self.assertEqual(grid_x(job), 3)
+        self.assertEqual(grid_y(job), 2)
+        off = offset_vector(job)
+        self.assertRoughly(off.x, 103)
+        self.assertRoughly(off.y, 52)
 
     def test_is_enabled_requires_grid(self):
         self.assertFalse(is_enabled(_FakeJob(enabled=True, nx=0, ny=0)))
@@ -222,3 +264,68 @@ class TestPathExportArray(PathTestBase):
         self.assertRoughly(ys[0], 22)
         self.assertRoughly(xs[1], 14)
         self.assertRoughly(ys[1], 25)
+
+    def test_parse_and_format_cycle_time(self):
+        self.assertEqual(parse_cycle_time_seconds("00:01:30"), 90)
+        self.assertEqual(parse_cycle_time_seconds("1:02:03"), 3723)
+        self.assertEqual(parse_cycle_time_seconds("1:05"), 65)
+        self.assertEqual(parse_cycle_time_seconds("0"), 0)
+        self.assertIsNone(parse_cycle_time_seconds("Tool Feedrate Error"))
+        self.assertEqual(format_duration(90), "1:30")
+        self.assertEqual(format_duration(3723), "1:02:03")
+
+    def test_count_tool_changes_first_load_and_switches(self):
+        mill = _FakeOp("Mill", "G1 X1", tool=1)
+        mill2 = _FakeOp("Mill2", "G1 X2", tool=1)
+        drill = _FakeOp("Drill", "G81 X1", tool=2)
+        self.assertEqual(count_tool_changes([mill]), 1)
+        self.assertEqual(count_tool_changes([mill, mill2]), 1)
+        self.assertEqual(count_tool_changes([mill, mill2, drill]), 2)
+        self.assertEqual(count_tool_changes([mill, drill, mill2]), 3)
+
+    def test_estimate_job_time_multiplies_milling_not_tool_changes(self):
+        mill = _FakeOp("Mill", "G1 X1", cycle="00:01:00", tool=1)
+        drill = _FakeOp("Drill", "G81 X1", cycle="00:00:30", tool=2)
+        job = _FakeJob(
+            enabled=True,
+            nx=1,
+            ny=0,
+            offset=FreeCAD.Vector(10, 0, 0),
+            mask="11",
+            tool_change=20,
+            ops=[mill, drill],
+        )
+        est = estimate_job_time(job)
+        # 2 ops × 2 parts: (60+30)*2 = 180s milling; 2 tool changes × 20s
+        self.assertEqual(est["copies"], 2)
+        self.assertEqual(est["operations"], 2)
+        self.assertEqual(est["mill_seconds"], 180)
+        self.assertEqual(est["tool_changes"], 2)
+        self.assertEqual(est["tool_change_total"], 40)
+        self.assertEqual(est["total_seconds"], 220)
+        text = format_job_time_estimate(est)
+        self.assertIn("3:40", text)
+        self.assertIn("3:00", text)
+
+    def test_estimate_job_time_without_array_is_one_copy(self):
+        mill = _FakeOp("Mill", "G1 X1", cycle="00:02:00", tool=3)
+        job = _FakeJob(enabled=False, nx=2, ny=2, ops=[mill], tool_change=15)
+        est = estimate_job_time(job)
+        self.assertEqual(copy_count(job), 1)
+        self.assertEqual(est["mill_seconds"], 120)
+        self.assertEqual(est["tool_changes"], 1)
+        self.assertEqual(est["total_seconds"], 135)
+
+    def test_estimate_job_time_no_selected_cells(self):
+        mill = _FakeOp("Mill", "G1 X1", cycle="00:01:00", tool=1)
+        job = _FakeJob(
+            enabled=True,
+            nx=1,
+            ny=0,
+            mask="00",
+            ops=[mill],
+        )
+        est = estimate_job_time(job)
+        self.assertEqual(est["copies"], 0)
+        self.assertEqual(est["total_seconds"], 0)
+        self.assertIn("—", format_job_time_estimate(est))

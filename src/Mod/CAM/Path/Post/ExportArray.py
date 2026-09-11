@@ -108,6 +108,21 @@ def ensure_job_properties(obj):
         obj.ExportArrayMask = default_mask(1, 1)
         obj.setEditorMode("ExportArrayMask", 2)
 
+    if not hasattr(obj, "ToolChangeTime"):
+        obj.addProperty(
+            "App::PropertyTime",
+            "ToolChangeTime",
+            "Output",
+            QT_TRANSLATE_NOOP(
+                "App::Property",
+                "Estimated time for each tool change, including the first tool load",
+            ),
+        )
+        try:
+            obj.ToolChangeTime = FreeCAD.Units.Quantity("30 s")
+        except Exception:
+            obj.ToolChangeTime = 30.0
+
     _sync_editor_modes(obj)
     new_mask = normalize_mask(
         getattr(obj, "ExportArrayMask", ""),
@@ -134,14 +149,46 @@ def _sync_editor_modes(obj):
         obj.setEditorMode("ExportArrayMask", 2)
 
 
+def evaluated_number(obj, prop, default=0.0):
+    """Return a property's numeric value, evaluating a bound expression if present.
+
+    Expressions can be set in the Data view or Job panel before the document
+    has recomputed, so the stored property may still be 0.
+    """
+    if obj is None:
+        return default
+    engine = getattr(obj, "ExpressionEngine", None) or []
+    for name, expr in engine:
+        if name != prop:
+            continue
+        try:
+            val = obj.evalExpression(expr)
+            if hasattr(val, "Value"):
+                return float(val.Value)
+            return float(val)
+        except Exception:
+            break
+    try:
+        attr = obj
+        for part in prop.split("."):
+            attr = getattr(attr, part)
+        if attr is None:
+            return default
+        if hasattr(attr, "Value"):
+            return float(attr.Value)
+        return float(attr)
+    except Exception:
+        return default
+
+
 def copies_x(job):
     """Extra copies in X (CAM Array CopiesX)."""
-    return max(0, int(getattr(job, "ExportArrayCountX", 0) or 0))
+    return max(0, int(round(evaluated_number(job, "ExportArrayCountX", 0))))
 
 
 def copies_y(job):
     """Extra copies in Y (CAM Array CopiesY)."""
-    return max(0, int(getattr(job, "ExportArrayCountY", 0) or 0))
+    return max(0, int(round(evaluated_number(job, "ExportArrayCountY", 0))))
 
 
 def grid_x(job):
@@ -165,9 +212,14 @@ def count_y(job):
 
 def offset_vector(job):
     off = getattr(job, "ExportArrayOffset", None)
-    if off is None:
-        return FreeCAD.Vector(0, 0, 0)
-    return FreeCAD.Vector(off.x, off.y, off.z)
+    zx = zy = zz = 0.0
+    if off is not None:
+        zx, zy, zz = float(off.x), float(off.y), float(off.z)
+    return FreeCAD.Vector(
+        evaluated_number(job, "ExportArrayOffset.x", zx),
+        evaluated_number(job, "ExportArrayOffset.y", zy),
+        evaluated_number(job, "ExportArrayOffset.z", zz),
+    )
 
 
 def default_mask(nx, ny):
@@ -405,3 +457,181 @@ def update_preview(job):
         _sync_origin_visibility(job)
     except Exception as e:
         Path.Log.error(f"Export array preview failed: {e}")
+
+
+def parse_cycle_time_seconds(value):
+    """Parse an operation CycleTime string ('HH:MM:SS' or 'MM:SS') to seconds.
+
+    Returns None if the value is missing or not a duration (e.g. an error).
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if value < 0:
+            return None
+        return float(value)
+    if hasattr(value, "Value"):
+        try:
+            return float(value.Value)
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text or text == "0":
+        return 0.0
+    parts = text.split(":")
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def format_duration(seconds):
+    """Format seconds as H:MM:SS or M:SS."""
+    total = max(0, int(round(float(seconds or 0))))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def _posting_operations(job):
+    """Operations that will be posted, matching expand_operations sources."""
+    ops = getattr(getattr(job, "Operations", None), "Group", None) or []
+    active = [op for op in ops if PathUtil.activeForOp(op)]
+    if is_enabled(job):
+        bases = [op for op in active if not is_cam_array_operation(op)]
+        return bases if bases else active
+    return active
+
+
+def _tool_number(op):
+    tc = PathUtil.toolControllerForOp(op)
+    if tc is None:
+        return None
+    try:
+        return int(tc.ToolNumber)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def operation_cycle_seconds(op):
+    """Seconds for one run of an operation, or None if unknown."""
+    parsed = parse_cycle_time_seconds(getattr(op, "CycleTime", None))
+    if parsed is not None:
+        return parsed
+    path = getattr(op, "Path", None)
+    if path is None or getattr(path, "Length", 0) == 0:
+        return 0.0
+    try:
+        from Path.Op.Util import getCycleTimeEstimate
+
+        result = getCycleTimeEstimate(op, formatted=False)
+    except Exception:
+        return None
+    if isinstance(result, (int, float)):
+        return float(result)
+    return None
+
+
+def count_tool_changes(operations):
+    """Count tool loads/changes in operation order.
+
+    The first tool load counts as one change. Repeating the same tool
+    (including across export-array copies) does not add another change.
+    """
+    previous = None
+    changes = 0
+    for op in operations:
+        number = _tool_number(op)
+        if number is None:
+            continue
+        if previous is None or number != previous:
+            changes += 1
+            previous = number
+    return changes
+
+
+def copy_count(job):
+    """How many selected cells will be milled; 1 when the export array is off."""
+    if not is_enabled(job):
+        return 1
+    return len(selected_cells(job))
+
+
+def estimate_job_time(job):
+    """Estimate posted job time: operation cycle times × copies + tool changes.
+
+    Export array posts each operation across selected cells, then the next
+    operation, so tool changes follow the operation list and are not
+    multiplied by the number of parts.
+    """
+    ops = _posting_operations(job)
+    copies = copy_count(job)
+    mill_one = 0.0
+    errors = []
+    for op in ops:
+        seconds = operation_cycle_seconds(op)
+        if seconds is None:
+            errors.append(getattr(op, "Label", getattr(op, "Name", "operation")))
+            continue
+        mill_one += seconds
+
+    mill = mill_one * copies
+    changes = count_tool_changes(ops) if copies else 0
+    per_change = max(0.0, evaluated_number(job, "ToolChangeTime", 0.0))
+    change_total = changes * per_change
+    return {
+        "operations": len(ops),
+        "copies": copies,
+        "mill_seconds": mill,
+        "tool_changes": changes,
+        "tool_change_seconds": per_change,
+        "tool_change_total": change_total,
+        "total_seconds": mill + change_total,
+        "errors": errors,
+    }
+
+
+def format_job_time_estimate(estimate):
+    """Human-readable breakdown for the Job Output panel."""
+    copies = estimate["copies"]
+    nops = estimate["operations"]
+    if nops == 0 or copies == 0:
+        return translate("CAM_Job", "Estimated job time: —")
+
+    mill = format_duration(estimate["mill_seconds"])
+    total = format_duration(estimate["total_seconds"])
+    changes = estimate["tool_changes"]
+    per_change = format_duration(estimate["tool_change_seconds"])
+    change_total = format_duration(estimate["tool_change_total"])
+
+    if copies == 1:
+        mill_line = translate("CAM_Job", "Milling %s (%s operations)") % (mill, nops)
+    else:
+        mill_line = translate("CAM_Job", "Milling %s (%s operations × %s parts)") % (
+            mill,
+            nops,
+            copies,
+        )
+    change_line = translate("CAM_Job", "Tool changes %s (%s × %s)") % (
+        change_total,
+        changes,
+        per_change,
+    )
+    lines = [
+        translate("CAM_Job", "Estimated job time: %s") % total,
+        mill_line,
+        change_line,
+    ]
+    if estimate["errors"]:
+        missing = ", ".join(estimate["errors"])
+        lines.append(
+            translate("CAM_Job", "Missing cycle time: %s") % missing
+        )
+    return "\n".join(lines)
