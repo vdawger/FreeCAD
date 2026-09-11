@@ -22,6 +22,8 @@
  ***************************************************************************/
 
 
+#include <FCConfig.h>
+
 #include <Inventor/SbViewportRegion.h>
 #include <Inventor/SoEventManager.h>
 #include <Inventor/SoPickedPoint.h>
@@ -47,6 +49,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 
 #include <Base/Interpreter.h>
@@ -61,6 +64,7 @@
 #include "Action.h"
 #include "Document.h"
 #include "Inventor/SoMouseWheelEvent.h"
+#include "SoTouchEvents.h"
 #include "MenuManager.h"
 #include "MouseSelection.h"
 #include "Navigation/NavigationAnimator.h"
@@ -72,6 +76,18 @@
 #include "ViewProviderDocumentObject.h"
 
 using namespace Gui;
+
+namespace
+{
+bool blenderTrackpadDefault()
+{
+#if defined(Q_OS_MACOS) || defined(FC_OS_MACOSX)
+    return true;
+#else
+    return false;
+#endif
+}
+}  // namespace
 
 NavigationStyleContextMenuReceiver::NavigationStyleContextMenuReceiver(
     ViewProviderDocumentObject* viewProvider,
@@ -490,6 +506,10 @@ void NavigationStyle::initialize()
     this->zoomStep = App::GetApplication()
                          .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
                          ->GetFloat("ZoomStep", 0.2f);
+    this->blenderTrackpadEnabled = App::GetApplication()
+                                       .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
+                                       ->GetBool("BlenderTrackpad", blenderTrackpadDefault());
+    this->lastTrackpadPinchTime = SbTime(0.0);
     long mode = App::GetApplication()
                     .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
                     ->GetInt("RotationMode", 0);
@@ -1857,6 +1877,16 @@ SbBool NavigationStyle::isZoomAtCursor() const
     return this->zoomAtCursor;
 }
 
+void NavigationStyle::setBlenderTrackpadEnabled(SbBool on)
+{
+    this->blenderTrackpadEnabled = on;
+}
+
+SbBool NavigationStyle::isBlenderTrackpadEnabled() const
+{
+    return this->blenderTrackpadEnabled;
+}
+
 void NavigationStyle::setRotationCenterMode(NavigationStyle::RotationCenterModes mode)
 {
     this->rotationCenterMode = mode;
@@ -2272,6 +2302,11 @@ SbBool NavigationStyle::processEvent(const SoEvent* const ev)
         }
     }
 
+    if (blenderTrackpadEnabled && !SoGesturePinchEvent::getClassTypeId().isBad()
+        && ev->isOfType(SoGesturePinchEvent::getClassTypeId())) {
+        return processBlenderTrackpadPinch(static_cast<const SoGesturePinchEvent*>(ev));
+    }
+
     const ViewerMode curmode = this->currentmode;
 
     SbBool processed = false;
@@ -2294,8 +2329,8 @@ SbBool NavigationStyle::processSoEvent(const SoEvent* const ev)
     bool processed = false;
     bool offeredtoViewerEventBase = false;
 
-    // handle mouse wheel zoom
-    if (ev->isOfType(SoMouseWheelEvent::getClassTypeId())) {
+    // handle mouse wheel zoom / trackpad orbit
+    if (!processed && ev->isOfType(SoMouseWheelEvent::getClassTypeId())) {
         auto const event = static_cast<const SoMouseWheelEvent*>(ev);
         processed = processWheelEvent(event);
         viewer->processSoEventBase(ev);
@@ -2565,11 +2600,113 @@ void NavigationStyle::replayDeferredMouseDownEvent()
 
 SbBool NavigationStyle::processWheelEvent(const SoMouseWheelEvent* const event)
 {
+    if (blenderTrackpadEnabled && event->isFromTrackpad()) {
+        return processBlenderTrackpadWheel(event);
+    }
+
     const SbVec2s pos(event->getPosition());
     const SbVec2f posn = normalizePixelPos(pos);
 
     // handle mouse wheel zoom
     doZoom(viewer->getSoRenderManager()->getCamera(), event->getDelta(), posn);
+    return true;
+}
+
+SbBool NavigationStyle::processBlenderTrackpadWheel(const SoMouseWheelEvent* const event)
+{
+    const double sincePinch = (event->getTime() - lastTrackpadPinchTime).getValue();
+    if (sincePinch >= 0.0 && sincePinch < 0.15) {
+        return true;
+    }
+
+    SoCamera* camera = viewer->getSoRenderManager()->getCamera();
+    if (!camera) {
+        return true;
+    }
+
+    animator->stop();
+
+    const int width = std::max(1, viewer->width());
+    const int height = std::max(1, viewer->height());
+
+    float nx = 0.0F;
+    float ny = 0.0F;
+    if (event->getPixelDeltaX() != 0 || event->getPixelDeltaY() != 0) {
+        nx = -static_cast<float>(event->getPixelDeltaX()) / static_cast<float>(width);
+        ny = -static_cast<float>(event->getPixelDeltaY()) / static_cast<float>(height);
+    }
+    else {
+        constexpr float angleToView = 0.08F / 120.0F;
+        nx = -static_cast<float>(event->getDeltaX()) * angleToView;
+        ny = -static_cast<float>(event->getDelta()) * angleToView;
+    }
+
+    if (nx == 0.0F && ny == 0.0F) {
+        return true;
+    }
+
+    const SbVec2f prev(0.5F, 0.5F);
+    const SbVec2f curr(0.5F + nx, 0.5F + ny);
+    const SbVec2f posn = normalizePixelPos(event->getPosition());
+
+    if (event->wasShiftDown()) {
+        const SbViewportRegion& vp = viewer->getSoRenderManager()->getViewportRegion();
+        setupPanningPlane(camera);
+        // Horizontal pan uses the opposite X sign from the shared orbit delta.
+        const SbVec2f panCurr(0.5F - nx, 0.5F + ny);
+        panCamera(camera, vp.getViewportAspectRatio(), panningplane, panCurr, prev);
+        hasPanned = true;
+        return true;
+    }
+
+    if (event->wasCtrlDown()) {
+        int zoomDelta = event->getPixelDeltaY();
+        if (std::abs(event->getPixelDeltaX()) > std::abs(zoomDelta)) {
+            zoomDelta = event->getPixelDeltaX();
+        }
+        if (zoomDelta == 0) {
+            zoomDelta = event->getDelta();
+            if (std::abs(event->getDeltaX()) > std::abs(zoomDelta)) {
+                zoomDelta = event->getDeltaX();
+            }
+        }
+        doZoom(camera, zoomDelta, posn);
+        hasZoomed = true;
+        return true;
+    }
+
+    // Horizontal two-finger orbit is opposite the shared X delta; vertical is not.
+    const SbVec2f orbitCurr(0.5F - nx, 0.5F + ny);
+    spin_simplified(orbitCurr, prev);
+    return true;
+}
+
+SbBool NavigationStyle::processBlenderTrackpadPinch(const SoGesturePinchEvent* const pinch)
+{
+    if (pinch->state == SoGestureEvent::SbGsCanceled) {
+        return true;
+    }
+
+    const auto factor = static_cast<float>(pinch->deltaZoom);
+    if (factor <= 1.0e-6F || std::fabs(factor - 1.0F) <= 1.0e-5F) {
+        return true;
+    }
+
+    lastTrackpadPinchTime = pinch->getTime();
+
+    SbVec2f posn(0.5F, 0.5F);
+    const SbVec2s vpSize
+        = viewer->getSoRenderManager()->getViewportRegion().getViewportSizePixels();
+    const SbVec2s pix = pinch->getPosition();
+    if (pix[0] >= 0 && pix[1] >= 0 && pix[0] <= vpSize[0] && pix[1] <= vpSize[1]) {
+        posn = normalizePixelPos(pix);
+    }
+
+    // Pinch follows the OS: fingers apart zooms in. Invert Zoom is for the
+    // mouse wheel only, so it is not applied here.
+    const float logfactor = -std::log(factor);
+    doZoom(viewer->getSoRenderManager()->getCamera(), logfactor, posn);
+    hasZoomed = true;
     return true;
 }
 

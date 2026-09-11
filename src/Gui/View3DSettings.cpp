@@ -21,6 +21,8 @@
  ***************************************************************************/
 
 
+#include <QtGlobal>
+
 #include <Inventor/fields/SoSFColor.h>
 #include <Inventor/nodes/SoDirectionalLight.h>
 #include <Inventor/nodes/SoOrthographicCamera.h>
@@ -101,6 +103,7 @@ void View3DSettings::applySettings()
     OnChange(*hGrp, "OrbitStyle");
     OnChange(*hGrp, "Sensitivity");
     OnChange(*hGrp, "ResetCursorPosition");
+    OnChange(*hGrp, "BlenderTrackpad");
     OnChange(*hGrp, "DimensionsVisible");
     OnChange(*hGrp, "Dimensions3dVisible");
     OnChange(*hGrp, "DimensionsDeltaVisible");
@@ -312,6 +315,17 @@ void View3DSettings::OnChange(ParameterGrp::SubjectType& rCaller, ParameterGrp::
         bool on = rGrp.GetBool("InvertZoom", true);
         for (auto _viewer : _viewers) {
             _viewer->navigationStyle()->setZoomInverted(on);
+        }
+    }
+    else if (strcmp(Reason, "BlenderTrackpad") == 0) {
+#if defined(Q_OS_MACOS)
+        const bool defaultOn = true;
+#else
+        const bool defaultOn = false;
+#endif
+        bool on = rGrp.GetBool("BlenderTrackpad", defaultOn);
+        for (auto _viewer : _viewers) {
+            _viewer->navigationStyle()->setBlenderTrackpadEnabled(on);
         }
     }
     else if (strcmp(Reason, "ZoomAtCursor") == 0) {

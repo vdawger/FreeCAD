@@ -802,10 +802,12 @@ public:
     {
         // Bug #0000607: Some mice also support horizontal scrolling which however might
         // lead to some unwanted zooming when pressing the MMB for panning.
-        // Thus, we filter out horizontal scrolling.
+        // Thus, we filter out horizontal scrolling. Keep pixel-delta trackpad
+        // events; those are 2D gestures, not mouse-wheel ticks.
         if (event->type() == QEvent::Wheel) {
             auto we = static_cast<QWheelEvent*>(event);  // NOLINT
-            if (qAbs(we->angleDelta().x()) > qAbs(we->angleDelta().y())) {
+            if (we->pixelDelta().isNull()
+                && qAbs(we->angleDelta().x()) > qAbs(we->angleDelta().y())) {
                 return true;
             }
         }
@@ -1291,8 +1293,18 @@ void View3DInventorViewer::init()
     getEventFilter()->registerInputDevice(new GesturesDevice(this));
 
     try {
+#ifdef Q_OS_MACOS
+        // Pinch must be grabbed on the OpenGL viewport or Qt never synthesizes
+        // QPinchGesture / may not deliver native magnify to the 3D view.
+        this->grabGesture(Qt::PinchGesture);
+        if (QWidget* vp = this->viewport()) {
+            vp->grabGesture(Qt::PinchGesture);
+            vp->setAttribute(Qt::WA_AcceptTouchEvents);
+        }
+#else
         this->grabGesture(Qt::PanGesture);
         this->grabGesture(Qt::PinchGesture);
+#endif
     }
     catch (Base::Exception& e) {
         Base::Console().warning("Failed to set up gestures. Error: %s\n", e.what());

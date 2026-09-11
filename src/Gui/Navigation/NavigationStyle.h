@@ -48,6 +48,7 @@
 // forward declarations
 class SoEvent;
 class SoMouseWheelEvent;
+class SoGesturePinchEvent;
 class SoMotion3Event;
 class SoQtViewer;
 class SoCamera;
@@ -219,6 +220,8 @@ public:
     void setZoomStep(float);
     void setZoomAtCursor(SbBool);
     SbBool isZoomAtCursor() const;
+    void setBlenderTrackpadEnabled(SbBool);
+    SbBool isBlenderTrackpadEnabled() const;
     void zoomIn();
     void zoomOut();
     void setRotationCenterMode(RotationCenterModes);
@@ -260,6 +263,8 @@ public:
     virtual SbBool processKeyboardEvent(const SoKeyboardEvent* const event);
     virtual SbBool processClickEvent(const SoMouseButtonEvent* const event);
     virtual SbBool processWheelEvent(const SoMouseWheelEvent* const event);
+    SbBool processBlenderTrackpadWheel(const SoMouseWheelEvent* const event);
+    SbBool processBlenderTrackpadPinch(const SoGesturePinchEvent* const event);
 
     void setPopupMenuEnabled(const SbBool on);
     SbBool isPopupMenuEnabled() const;
@@ -420,6 +425,8 @@ protected:
     SbBool invertZoom;
     SbBool zoomAtCursor;
     float zoomStep;
+    SbBool blenderTrackpadEnabled;
+    SbTime lastTrackpadPinchTime;
     SbBool hasDragged;
     SbBool hasPanned;
     SbBool hasZoomed;

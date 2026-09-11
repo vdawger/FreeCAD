@@ -958,6 +958,17 @@ bool QuarterWidget::viewportEvent(QEvent* event)
             return false;
         }
     }
+    else if (event->type() == QEvent::NativeGesture
+             || event->type() == QEvent::Gesture
+             || event->type() == QEvent::GestureOverride) {
+        // Pinch/magnify is delivered to the OpenGL viewport, not the
+        // QGraphicsView, so the view's event filter never sees it unless we
+        // forward it here.
+        if (PRIVATE(this)->eventfilter->eventFilter(this, event)) {
+            event->accept();
+            return true;
+        }
+    }
 
     return QGraphicsView::viewportEvent(event);
 }

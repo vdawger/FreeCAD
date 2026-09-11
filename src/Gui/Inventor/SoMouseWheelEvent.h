@@ -45,9 +45,17 @@ public:  // methods
     }
     SoMouseWheelEvent()
         : delta(0)
+        , deltaX(0)
+        , pixelDeltaX(0)
+        , pixelDeltaY(0)
+        , fromTrackpad(false)
     {}
     SoMouseWheelEvent(int delta)
         : delta(delta)
+        , deltaX(0)
+        , pixelDeltaX(0)
+        , pixelDeltaY(0)
+        , fromTrackpad(false)
     {}
     /// returns wheel position change. One click is usually 120 units,
     ///  smaller values come from high-resolution devices like touchpads
@@ -59,8 +67,41 @@ public:  // methods
     {
         this->delta = delta;
     }
+    int getDeltaX() const
+    {
+        return deltaX;
+    }
+    void setDeltaX(int value)
+    {
+        this->deltaX = value;
+    }
+    int getPixelDeltaX() const
+    {
+        return pixelDeltaX;
+    }
+    int getPixelDeltaY() const
+    {
+        return pixelDeltaY;
+    }
+    void setPixelDelta(int x, int y)
+    {
+        this->pixelDeltaX = x;
+        this->pixelDeltaY = y;
+    }
+    bool isFromTrackpad() const
+    {
+        return fromTrackpad;
+    }
+    void setFromTrackpad(bool value)
+    {
+        this->fromTrackpad = value;
+    }
     ~SoMouseWheelEvent() override = default;
 
 private:  // data
     int delta;
+    int deltaX;
+    int pixelDeltaX;
+    int pixelDeltaY;
+    bool fromTrackpad;
 };

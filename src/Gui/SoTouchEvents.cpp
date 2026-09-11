@@ -21,10 +21,14 @@
  ***************************************************************************/
 
 
+#include <cmath>
 #include <numbers>
 
 #include <QApplication>
+#include <QEvent>
 #include <QGestureEvent>
+#include <QNativeGestureEvent>
+#include <QPointF>
 #include <QWidget>
 
 #include <Base/Exception.h>
@@ -187,14 +191,72 @@ GesturesDevice::GesturesDevice(QWidget* widget)
 
 const SoEvent* GesturesDevice::translateEvent(QEvent* event)
 {
+    if (event->type() == QEvent::NativeGesture) {
+        auto* native = static_cast<QNativeGestureEvent*>(event);
+        if (native->gestureType() != Qt::ZoomNativeGesture) {
+            return nullptr;
+        }
+
+        qreal mag = native->value();
+        if (std::fabs(mag) < 1.0e-12) {
+            mag = native->delta().y();
+        }
+        // Qt documents this as percent; Cocoa delivers a small scale increment
+        // used as scale *= (1 + value).
+        if (std::fabs(mag) > 0.5) {
+            mag /= 100.0;
+        }
+
+        auto* pinch = new SoGesturePinchEvent();
+        pinch->deltaZoom = 1.0 + mag;
+        if (pinch->deltaZoom < 0.01) {
+            pinch->deltaZoom = 0.01;
+        }
+        pinch->totalZoom = pinch->deltaZoom;
+        pinch->deltaAngle = 0.0;
+        pinch->totalAngle = 0.0;
+        pinch->state = SoGestureEvent::SbGSUpdate;
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        const QPointF localPos = native->position();
+#else
+        const QPointF localPos = native->pos();
+#endif
+        const qreal dpr = this->widget->devicePixelRatioF();
+        const SbVec2s win(
+            static_cast<short>(this->widget->width()),
+            static_cast<short>(this->widget->height())
+        );
+        const SbVec2s coinPos = Quarter::InputDevice::toDevicePixelPosition(localPos, win, dpr);
+        pinch->setPosition(coinPos);
+        pinch->curCenter = SbVec2f(static_cast<float>(coinPos[0]), static_cast<float>(coinPos[1]));
+        pinch->startCenter = pinch->curCenter;
+        pinch->deltaCenter = SbVec2f(0.0f, 0.0f);
+
+        const Qt::KeyboardModifiers mods = native->modifiers();
+        pinch->setShiftDown(mods.testFlag(Qt::ShiftModifier));
+        pinch->setCtrlDown(mods.testFlag(Qt::ControlModifier));
+        pinch->setAltDown(mods.testFlag(Qt::AltModifier));
+        pinch->setTime(SbTime::getTimeOfDay());
+        native->accept();
+        return pinch;
+    }
+
     if (event->type() == QEvent::Gesture || event->type() == QEvent::GestureOverride) {
         auto gevent = static_cast<QGestureEvent*>(event);
 
         auto zg = static_cast<QPinchGesture*>(gevent->gesture(Qt::PinchGesture));
         if (zg) {
             gevent->setAccepted(Qt::PinchGesture, true);  // prefer it over pan
+            gevent->accept();
             return new SoGesturePinchEvent(zg, this->widget);
         }
+
+#ifdef Q_OS_MACOS
+        // Two-finger scroll is a wheel event on macOS. Consuming it as a pan
+        // gesture would steal orbit from the trackpad mapping.
+        return nullptr;
+#endif
 
         auto pg = static_cast<QPanGesture*>(gevent->gesture(Qt::PanGesture));
         if (pg) {

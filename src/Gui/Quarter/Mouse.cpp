@@ -42,6 +42,7 @@
 #endif
 
 #include <QEvent>
+#include <QInputDevice>
 #include <QMouseEvent>
 #include <QWheelEvent>
 
@@ -189,7 +190,23 @@ MouseP::mouseWheelEvent(QWheelEvent * event)
   // value indicates that the wheel was rotated backwards toward the
   // user. A typical wheel click is 120, but values coming from touchpad
   // can be a lot lower
-  this->wheel->setDelta(event->angleDelta().y());
+  const QPoint angle = event->angleDelta();
+  const QPoint pixel = event->pixelDelta();
+  this->wheel->setDelta(angle.y());
+  this->wheel->setDeltaX(angle.x());
+  this->wheel->setPixelDelta(pixel.x(), pixel.y());
+
+  bool fromTrackpad = false;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  if (const QInputDevice* device = event->device()) {
+      fromTrackpad = device->type() == QInputDevice::DeviceType::TouchPad;
+  }
+#endif
+  if (!fromTrackpad) {
+      fromTrackpad = (event->phase() != Qt::NoScrollPhase)
+          && (event->source() != Qt::MouseEventNotSynthesized);
+  }
+  this->wheel->setFromTrackpad(fromTrackpad);
 
   return this->wheel;
 }
