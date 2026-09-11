@@ -183,6 +183,7 @@ private:
     bool binding;
     bool checkDocument;
     bool closingEditor;
+    bool delayedTransactionClose;
     bool dragInProgress;
 
     // max distance between mouse and a cell, small enough to trigger resize

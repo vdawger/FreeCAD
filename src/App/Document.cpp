@@ -2981,6 +2981,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         // set all dependent objects touched based on properties
                         std::vector<DepEdge> inList = obj->getInListProp();
                         for (auto& [objFrom, propFrom, objTo, propTo] : inList) {
+                            if (!objFrom || !objFrom->isAttachedToDocument()) {
+                                continue;
+                            }
                             if (obj->touchedProps.contains(propTo) || propTo.empty()) {
                                 objFrom->enforceRecompute(propFrom);
                             }
@@ -2991,7 +2994,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         obj->purgeTouched();
                         // set all dependent objects touched to force recompute
                         for (auto inObjIt : obj->getInList()) {
-                            inObjIt->enforceRecompute();
+                            if (inObjIt && inObjIt->isAttachedToDocument()) {
+                                inObjIt->enforceRecompute();
+                            }
                         }
                     }
                 }

@@ -215,6 +215,9 @@ void DocumentObject::setTouched(const char* name)
 
 void DocumentObject::touch(bool noRecompute)
 {
+    if (StatusBits.test(ObjectStatus::Destroy)) {
+        return;
+    }
     if (!noRecompute) {
         StatusBits.set(ObjectStatus::Enforce);
     }

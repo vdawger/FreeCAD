@@ -22,6 +22,7 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <string>
 #include <boost/algorithm/string/predicate.hpp>
 #include <QApplication>
 #include <QClipboard>
@@ -34,6 +35,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QTextBrowser>
+#include <QTimer>
 
 #include <App/Application.h>
 #include <App/Document.h>
@@ -67,6 +69,7 @@ PropertyEditor::PropertyEditor(QWidget* parent)
     , binding(false)
     , checkDocument(false)
     , closingEditor(false)
+    , delayedTransactionClose(false)
     , dragInProgress(false)
 {
     propertyModel = new PropertyModel(this);
@@ -122,6 +125,16 @@ PropertyEditor::PropertyEditor(QWidget* parent)
 
 PropertyEditor::~PropertyEditor()
 {
+    // A deferred closeTransaction() is cancelled with this object. Commit
+    // without recomputing so we do not leave a booked transaction open.
+    if (transactionID != 0) {
+        if (App::Document* doc = App::GetApplication().getActiveDocument()) {
+            if (doc->getBookedTransactionID() == transactionID) {
+                doc->commitTransaction();
+            }
+        }
+        transactionID = 0;
+    }
     QItemEditorFactory* f = delegate->itemEditorFactory();
     delegate->setItemEditorFactory(nullptr);
     delete f;
@@ -435,7 +448,10 @@ void PropertyEditor::onItemActivated(const QModelIndex& index)
 void PropertyEditor::recomputeDocument(App::Document* doc)
 {
     try {
-        if (doc && !doc->isTransactionEmpty()) {
+        if (!doc || doc->testStatus(App::Document::Recomputing)) {
+            return;
+        }
+        if (!doc->isTransactionEmpty()) {
             // Between opening and committing a transaction a recompute
             // could already have been done
             if (doc->isTouched()) {
@@ -464,16 +480,51 @@ void PropertyEditor::recomputeDocument(App::Document* doc)
 void PropertyEditor::closeTransaction()
 {
     App::Document* doc = App::GetApplication().getActiveDocument();
-    if (!doc) {
+    if (!doc || transactionID == 0) {
         return;
     }
-    if (doc->getBookedTransactionID() == transactionID) {
-        if (autoupdate) {
-            recomputeDocument(doc);
-        }
+    if (doc->getBookedTransactionID() != transactionID) {
+        return;
+    }
+
+    if (!autoupdate) {
         doc->commitTransaction();
         transactionID = 0;
+        return;
     }
+
+    // closeEditor() runs from the property editor widget's eventFilter.
+    // Recomputing there rebuilds this model and fires object-touched
+    // signals while Qt is still dispatching events to the editor — that
+    // is a use-after-free (SIGSEGV in FastSignals during enforceRecompute).
+    if (delayedTransactionClose) {
+        return;
+    }
+    delayedTransactionClose = true;
+    const int tid = transactionID;
+    const std::string docName = doc->getName();
+    QTimer::singleShot(0, this, [this, tid, docName]() {
+        delayedTransactionClose = false;
+        if (activeEditor) {
+            // Tab/keyboard navigation already opened the next editor.
+            // Keep the transaction open until that editor closes.
+            return;
+        }
+        App::Document* delayedDoc = App::GetApplication().getDocument(docName.c_str());
+        if (!delayedDoc) {
+            if (transactionID == tid) {
+                transactionID = 0;
+            }
+            return;
+        }
+        if (delayedDoc->getBookedTransactionID() == tid) {
+            recomputeDocument(delayedDoc);
+            delayedDoc->commitTransaction();
+        }
+        if (transactionID == tid) {
+            transactionID = 0;
+        }
+    });
 }
 
 void PropertyEditor::closeEditor(QWidget* editor, QAbstractItemDelegate::EndEditHint hint)
