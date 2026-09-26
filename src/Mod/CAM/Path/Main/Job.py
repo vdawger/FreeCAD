@@ -777,11 +777,18 @@ class ObjectJob:
 
                 if attrs.get(JobTemplate.ToolController):
                     for tc in attrs.get(JobTemplate.ToolController):
-                        ctrl = PathToolController.FromTemplate(tc)
+                        try:
+                            ctrl = PathToolController.FromTemplate(tc)
+                        except Exception as exc:
+                            Path.Log.error(
+                                "Failed to create tool controller "
+                                f"'{tc.get('name', 'tool')}' from template: {exc}"
+                            )
+                            continue
                         if ctrl:
                             tcs.append(ctrl)
                         else:
-                            Path.Log.debug(f"skipping TC {tc['name']}")
+                            Path.Log.debug(f"skipping TC {tc.get('name', tc)}")
                 if attrs.get(JobTemplate.Stock):
                     obj.Stock = PathStock.CreateFromTemplate(obj, attrs.get(JobTemplate.Stock))
 
@@ -933,7 +940,10 @@ class ObjectJob:
                 ),
             )
             self.obj.Tools.addObject(tc)
-            Notification.updateTC.emit(self.obj, tc)
+            try:
+                Notification.updateTC.emit(self.obj, tc)
+            except Exception as exc:
+                Path.Log.error(f"Tool controller notification failed: {exc}")
 
     def allOperations(self):
         ops = []

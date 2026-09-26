@@ -371,6 +371,17 @@ class ViewProvider:
         )
 
 
+def _qt_widget_alive(widget):
+    """True when widget is a live Qt object. Deleted wrappers raise RuntimeError."""
+    if widget is None:
+        return False
+    try:
+        widget.objectName()
+    except RuntimeError:
+        return False
+    return True
+
+
 class TaskPanelPage:
     """Base class for all task panel pages."""
 
@@ -594,8 +605,19 @@ class TaskPanelPage:
             return
         if job != self.job:
             return
+        # Closed operation panels stay connected to Notification.updateTC.
+        # Refreshing them after the form is gone crashes tool add/delete.
+        if not _qt_widget_alive(self.combo):
+            try:
+                PathJob.Notification.updateTC.disconnect(self.resetToolController)
+            except Exception:
+                pass
+            return
         self.obj.ToolController = tc
-        self.setupToolController()
+        try:
+            self.setupToolController()
+        except RuntimeError as exc:
+            Path.Log.debug(f"Skipping tool controller refresh: {exc}")
 
     def copyToolController(self):
         oldTc = self.tcEditor.obj
@@ -622,6 +644,8 @@ class TaskPanelPage:
         labels = [c.Label for c in controllers]
         labels.append(FreeCAD.Qt.translate("CAM_Operation", "Copy {0}…").format(tcName))
         labels.append(FreeCAD.Qt.translate("CAM_Operation", "New tool controller…"))
+        if not _qt_widget_alive(self.combo):
+            return
         self.combo.blockSignals(True)
         self.combo.clear()
         self.combo.addItems(labels)

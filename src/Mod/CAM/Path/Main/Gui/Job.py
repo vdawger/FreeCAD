@@ -999,8 +999,88 @@ class TaskPanel:
         self.cleanup(resetEdit)
         return True
 
+    def _releaseComboAccessibility(self):
+        """Detach combo-box accessibility interfaces before the panel is deleted.
+
+        Closing this dialog destroys QComboBox children (machine, post, order).
+        On macOS with Qt 6.8 that crashes in QAccessibleCache::deleteInterface
+        while the combo popup view is torn down. Dropping the cached interfaces
+        first lets objectDestroyed find nothing to delete.
+        """
+        form = getattr(self, "form", None)
+        if form is None:
+            return
+        widgets = []
+        for combo in form.findChildren(QtGui.QComboBox):
+            try:
+                combo.hidePopup()
+            except Exception:
+                pass
+            widgets.append(combo)
+            view = combo.view()
+            if view is not None:
+                view.hide()
+                widgets.append(view)
+        for widget in widgets:
+            try:
+                iface = QtGui.QAccessible.queryAccessibleInterface(widget)
+                if iface is None:
+                    continue
+                QtGui.QAccessible.deleteAccessibleInterface(QtGui.QAccessible.uniqueId(iface))
+            except Exception:
+                pass
+
+    def _disconnectFormSignals(self):
+        """Remove Python slots before Qt destroys the panel.
+
+        PySide 6.8 crashes in QMetaObject::Connection while a QPushButton
+        destructor releases a lambda that still points at a widget in the
+        same tree (export-array headers, axis buttons). Disconnect first.
+        """
+        form = getattr(self, "form", None)
+        if form is None:
+            return
+        import warnings
+
+        objects = [form]
+        try:
+            objects.extend(form.findChildren(QtCore.QObject))
+        except Exception:
+            return
+        signal_names = (
+            "clicked",
+            "pressed",
+            "released",
+            "toggled",
+            "stateChanged",
+            "currentIndexChanged",
+            "currentTextChanged",
+            "currentChanged",
+            "textChanged",
+            "editingFinished",
+            "valueChanged",
+            "itemChanged",
+            "itemSelectionChanged",
+            "customContextMenuRequested",
+            "maskChanged",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for obj in objects:
+                for name in signal_names:
+                    sig = getattr(obj, name, None)
+                    disc = getattr(sig, "disconnect", None)
+                    if disc is None:
+                        continue
+                    try:
+                        disc()
+                    except Exception:
+                        pass
+
     def cleanup(self, resetEdit):
         Path.Log.track()
+        self._disconnectFormSignals()
+        self._releaseComboAccessibility()
         FreeCADGui.Control.closeDialog()
         if resetEdit:
             FreeCADGui.ActiveDocument.resetEdit()
@@ -1024,7 +1104,11 @@ class TaskPanel:
     def getFields(self):
         """sets properties in the object to match the form"""
         if self.obj:
-            self.obj.PostProcessor = str(self.form.postProcessor.currentText())
+            # PropertyEnumeration notifies even when the value is unchanged, and
+            # Job.onChanged builds a post processor for every notification.
+            post_name = str(self.form.postProcessor.currentText())
+            if self.obj.PostProcessor != post_name:
+                self.obj.PostProcessor = post_name
             self.obj.PostProcessorArgs = str(self.form.postProcessorArguments.displayText())
             self.obj.PostProcessorOutputFile = str(self.form.postProcessorOutputFile.text())
 
@@ -1222,9 +1306,27 @@ class TaskPanel:
         self.setupOps.setFields()
         self.populateMachineCombo()
 
+    def _export_array_on_output_tab(self):
+        box = getattr(self.form, "exportArrayEnabled", None)
+        tab = getattr(self.form, "tabOutput", None)
+        if box is None or tab is None:
+            return False
+        try:
+            widget = box
+            while widget is not None:
+                if widget is tab:
+                    return True
+                widget = widget.parentWidget()
+        except RuntimeError:
+            return False
+        return False
+
     def _setupExportArrayUi(self):
         """Add Export Array controls to the Output tab (not in the compiled .ui)."""
-        if hasattr(self.form, "exportArrayEnabled"):
+        from Path.Post.ExportArray import ensure_job_properties
+
+        ensure_job_properties(self.obj)
+        if self._export_array_on_output_tab():
             return
         tab = getattr(self.form, "tabOutput", None)
         if tab is None:
@@ -1327,8 +1429,9 @@ class TaskPanel:
         form.addRow(self.form.exportArrayJobTime)
         self._bindToolChangeTimeWidget()
 
-        # Insert above the WCS group (row 4) if possible.
-        grid.addWidget(group, 3, 0, 1, 3)
+        # Append on the Output tab. A fixed row collides on some job panels
+        # and the group is then created but not visible.
+        grid.addWidget(group, grid.rowCount(), 0, 1, max(1, grid.columnCount()))
 
         self.form.exportArrayEnabled.toggled.connect(self._exportArrayToggled)
         self.form.exportArrayEnabled.toggled.connect(self.getFields)
@@ -2133,6 +2236,10 @@ class TaskPanel:
             self.obj.Document.recompute()
 
     def setupUi(self, activate):
+        try:
+            self._setupExportArrayUi()
+        except Exception as exc:
+            Path.Log.error(f"Export array panel was not added: {exc}")
         self.setupGlobal.setupUi()
         try:
             self.setupOps.setupUi()

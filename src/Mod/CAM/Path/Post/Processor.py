@@ -781,23 +781,30 @@ class PostProcessor:
         if self._job is None:
             self._machine = None
         elif hasattr(self._job, "Machine"):
-            try:
-                machine = MachineFactory.get_machine(self._job.Machine)
-                if machine is None:
-                    # Machine not found in factory - allow manual assignment later
+            machine_name = str(getattr(self._job, "Machine", "") or "").strip()
+            if not machine_name:
+                # Jobs are allowed to have no machine selected. Looking that up
+                # only produces "Machine '' not found" once per post construction,
+                # which the Job panel does on every edit.
+                self._machine = None
+            else:
+                try:
+                    machine = MachineFactory.get_machine(machine_name)
+                    if machine is None:
+                        # Machine not found in factory - allow manual assignment later
+                        Path.Log.warning(
+                            f"Machine '{machine_name}' not found in factory. Machine can be set manually."
+                        )
+                        self._machine = None
+                    else:
+                        self._machine = machine
+                except FileNotFoundError as e:
+                    # Machine not found in factory - allow manual assignment later (e.g., in tests)
+                    # FIXME: if this is only for tests, remove it
                     Path.Log.warning(
-                        f"Machine '{self._job.Machine}' not found in factory. Machine can be set manually."
+                        f"Machine '{machine_name}' not found: {e}. Machine can be set manually."
                     )
                     self._machine = None
-                else:
-                    self._machine = machine
-            except FileNotFoundError as e:
-                # Machine not found in factory - allow manual assignment later (e.g., in tests)
-                # FIXME: if this is only for tests, remove it
-                Path.Log.warning(
-                    f"Machine '{self._job.Machine}' not found: {e}. Machine can be set manually."
-                )
-                self._machine = None
         else:
             # Job doesn't have Machine attribute yet (e.g., MockJob or legacy job)
             self._machine = None

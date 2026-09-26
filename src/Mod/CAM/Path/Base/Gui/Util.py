@@ -127,7 +127,16 @@ class QuantitySpinBox(QtCore.QObject):
         self.onBeforeChange = onBeforeChange
         self.prop = None
         self.obj = obj
-        self.lastWidgetText = self.widget.text()
+        self.valid = False
+        if widget is None:
+            return
+        try:
+            self.lastWidgetText = self.widget.text()
+        except RuntimeError:
+            # The spin box C++ object is already gone (panel closed while a
+            # tool-controller refresh was still running).
+            self.widget = None
+            return
         self.attachTo(obj, prop)
         self.widget.installEventFilter(self)
         # Connect local class method as slot
