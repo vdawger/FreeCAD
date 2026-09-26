@@ -96,20 +96,12 @@ namespace {
 
 QPointF getLocalPosition(const QMouseEvent* event)
 {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
   return event->position();
-#else
-  return event->localPos();
-#endif
 }
 
 QPointF getLocalPosition(const QWheelEvent* event)
 {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
   return event->position();
-#else
-  return event->posF();
-#endif
 }
 
 }
@@ -207,6 +199,14 @@ MouseP::mouseWheelEvent(QWheelEvent * event)
           && (event->source() != Qt::MouseEventNotSynthesized);
   }
   this->wheel->setFromTrackpad(fromTrackpad);
+
+  const QPoint pixels = event->pixelDelta();
+  const SbVec2f widgetDelta(static_cast<float>(pixels.x()), static_cast<float>(pixels.y()));
+  this->wheel->setPixelDelta(
+    SoMouseWheelEvent::toGlPixelDelta(widgetDelta,
+                                      static_cast<float>(publ->quarter->devicePixelRatio())),
+    SoMouseWheelEvent::isPreciseScroll(!pixels.isNull(), event->phase() != Qt::NoScrollPhase));
+  this->wheel->setScrollBegin(event->phase() == Qt::ScrollBegin);
 
   return this->wheel;
 }

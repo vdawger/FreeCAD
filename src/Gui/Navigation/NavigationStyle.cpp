@@ -77,18 +77,6 @@
 
 using namespace Gui;
 
-namespace
-{
-bool blenderTrackpadDefault()
-{
-#if defined(Q_OS_MACOS) || defined(FC_OS_MACOSX)
-    return true;
-#else
-    return false;
-#endif
-}
-}  // namespace
-
 NavigationStyleContextMenuReceiver::NavigationStyleContextMenuReceiver(
     ViewProviderDocumentObject* viewProvider,
     QObject* parent
@@ -508,7 +496,7 @@ void NavigationStyle::initialize()
                          ->GetFloat("ZoomStep", 0.2f);
     this->blenderTrackpadEnabled = App::GetApplication()
                                        .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
-                                       ->GetBool("BlenderTrackpad", blenderTrackpadDefault());
+                                       ->GetBool("BlenderTrackpad", blenderTrackpadByDefault());
     this->lastTrackpadPinchTime = SbTime(0.0);
     long mode = App::GetApplication()
                     .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
@@ -2337,6 +2325,10 @@ SbBool NavigationStyle::processSoEvent(const SoEvent* const ev)
         offeredtoViewerEventBase = true;
     }
 
+    if (!processed && ev->isOfType(SoGesturePinchEvent::getClassTypeId())) {
+        processed = processPinchEvent(static_cast<const SoGesturePinchEvent*>(ev));
+    }
+
     if (!processed && !offeredtoViewerEventBase) {
         processed = viewer->processSoEventBase(ev);
     }
@@ -2598,17 +2590,98 @@ void NavigationStyle::replayDeferredMouseDownEvent()
     clearDeferredMouseDownEvent();
 }
 
+bool NavigationStyle::touchpadScrollPansByDefault()
+{
+#ifdef Q_OS_MACOS
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool NavigationStyle::touchpadScrollPans()
+{
+    return App::GetApplication()
+        .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
+        ->GetBool("TouchpadScrollPans", touchpadScrollPansByDefault());
+}
+
+bool NavigationStyle::blenderTrackpadByDefault()
+{
+#if defined(Q_OS_MACOS) || defined(FC_OS_MACOSX)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool NavigationStyle::blenderTrackpadPref()
+{
+    return App::GetApplication()
+        .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
+        ->GetBool("BlenderTrackpad", blenderTrackpadByDefault());
+}
+
+NavigationStyle::WheelAction NavigationStyle::wheelAction(
+    bool preciseDevice,
+    bool scrollPans,
+    bool shiftDown,
+    bool ctrlDown
+)
+{
+    if (!preciseDevice || !scrollPans || ctrlDown) {
+        return WheelAction::Zoom;
+    }
+
+    return shiftDown ? WheelAction::Orbit : WheelAction::Pan;
+}
+
 SbBool NavigationStyle::processWheelEvent(const SoMouseWheelEvent* const event)
 {
     if (blenderTrackpadEnabled && event->isFromTrackpad()) {
         return processBlenderTrackpadWheel(event);
     }
 
-    const SbVec2s pos(event->getPosition());
-    const SbVec2f posn = normalizePixelPos(pos);
+    SoCamera* camera = viewer->getSoRenderManager()->getCamera();
+    const WheelAction action = wheelAction(
+        event->isPrecise(),
+        touchpadScrollPans(),
+        event->wasShiftDown(),
+        event->wasCtrlDown()
+    );
 
-    // handle mouse wheel zoom
-    doZoom(viewer->getSoRenderManager()->getCamera(), event->getDelta(), posn);
+    if (action != WheelAction::Zoom && !camera) {
+        return true;
+    }
+
+    if (event->isScrollBegin()) {
+        saveCursorPosition(event);
+    }
+
+    switch (action) {
+        case WheelAction::Orbit: {
+            const SbVec2f center(0.5F, 0.5F);
+            spin_simplified(center + normalizePixelPos(event->getPixelDelta()), center);
+            break;
+        }
+        case WheelAction::Pan: {
+            setupPanningPlane(camera);
+            const float ratio
+                = viewer->getSoRenderManager()->getViewportRegion().getViewportAspectRatio();
+            panCamera(
+                camera,
+                ratio,
+                this->panningplane,
+                normalizePixelPos(event->getPixelDelta()),
+                SbVec2f(0, 0)
+            );
+            break;
+        }
+        case WheelAction::Zoom:
+            doZoom(camera, event->getDelta(), normalizePixelPos(event->getPosition()));
+            break;
+    }
+
     return true;
 }
 
@@ -2708,6 +2781,72 @@ SbBool NavigationStyle::processBlenderTrackpadPinch(const SoGesturePinchEvent* c
     doZoom(viewer->getSoRenderManager()->getCamera(), logfactor, posn);
     hasZoomed = true;
     return true;
+}
+
+SbBool NavigationStyle::processPinchEvent(const SoGesturePinchEvent* const event)
+{
+    SoCamera* camera = viewer->getSoRenderManager()->getCamera();
+    if (!camera) {
+        return false;
+    }
+
+    if (event->state == SoGestureEvent::SbGSStart) {
+        setupPanningPlane(camera);
+        return true;
+    }
+
+    if (event->state == SoGestureEvent::SbGSEnd) {
+        return true;
+    }
+
+    const bool touchTiltDisabled = App::GetApplication()
+                                       .GetParameterGroupByPath(
+                                           "User parameter:BaseApp/Preferences/View"
+                                       )
+                                       ->GetBool("DisableTouchTilt", true);
+    const PinchAction action = pinchAction(event, touchTiltDisabled);
+    const SbVec2f posn = normalizePixelPos(event->curCenter);
+
+    if (event->deltaCenter != SbVec2f(0.0F, 0.0F)) {
+        const float ratio = viewer->getSoRenderManager()->getViewportRegion().getViewportAspectRatio();
+        panCamera(camera, ratio, this->panningplane, normalizePixelPos(event->deltaCenter), SbVec2f(0, 0));
+    }
+
+    if (action.zoom) {
+        doZoom(camera, action.zoomLogFactor, posn);
+    }
+
+    if (action.rotate) {
+        doRotate(camera, action.rotateAngle, posn);
+    }
+
+    return true;
+}
+
+NavigationStyle::PinchAction NavigationStyle::pinchAction(
+    const SoGesturePinchEvent* const event,
+    bool touchTiltDisabled
+)
+{
+    PinchAction action;
+
+    if (event->state != SoGestureEvent::SbGSUpdate) {
+        return action;
+    }
+
+    if (event->deltaZoom > 0.0) {
+        action.zoom = true;
+        action.zoomLogFactor = -logf(static_cast<float>(event->deltaZoom));
+    }
+
+    const bool tiltBlocked = touchTiltDisabled && !event->fromNativeGesture;
+
+    if (event->deltaAngle != 0.0 && !tiltBlocked) {
+        action.rotate = true;
+        action.rotateAngle = static_cast<float>(event->deltaAngle);
+    }
+
+    return action;
 }
 
 void NavigationStyle::setPopupMenuEnabled(const SbBool on)

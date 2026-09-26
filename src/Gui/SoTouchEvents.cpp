@@ -37,6 +37,47 @@
 #include "SoTouchEvents.h"
 
 
+bool NativeGesturePinch::update(Qt::NativeGestureType type, double value, const SbVec2s& glPos)
+{
+    if (type != Qt::BeginNativeGesture && !active) {
+        return false;
+    }
+
+    pinch.deltaZoom = 0.0;
+    pinch.deltaAngle = 0.0;
+    pinch.deltaCenter = SbVec2f(0.0F, 0.0F);
+    pinch.fromNativeGesture = true;
+    const SbVec2f center(static_cast<float>(glPos[0]), static_cast<float>(glPos[1]));
+    pinch.curCenter = center;
+    pinch.setPosition(glPos);
+    pinch.setTime(SbTime::getTimeOfDay());
+
+    switch (type) {
+        case Qt::BeginNativeGesture:
+            pinch.state = SoGestureEvent::SbGSStart;
+            beginCenter = center;
+            active = true;
+            break;
+        case Qt::EndNativeGesture:
+            pinch.state = SoGestureEvent::SbGSEnd;
+            active = false;
+            break;
+        case Qt::ZoomNativeGesture:
+            pinch.state = SoGestureEvent::SbGSUpdate;
+            pinch.deltaZoom = (1.0 + value > 0.0) ? 1.0 + value : 1.0;
+            break;
+        case Qt::RotateNativeGesture:
+            pinch.state = SoGestureEvent::SbGSUpdate;
+            pinch.deltaAngle = -Base::toRadians(value);
+            break;
+        default:
+            return false;
+    }
+
+    pinch.startCenter = beginCenter;
+    return true;
+}
+
 SO_EVENT_SOURCE(SoGestureEvent);
 
 SbBool SoGestureEvent::isSoGestureEvent(const SoEvent* ev) const
@@ -191,56 +232,35 @@ GesturesDevice::GesturesDevice(QWidget* widget)
 
 const SoEvent* GesturesDevice::translateEvent(QEvent* event)
 {
+#ifdef Q_OS_MACOS
     if (event->type() == QEvent::NativeGesture) {
         auto* native = static_cast<QNativeGestureEvent*>(event);
-        if (native->gestureType() != Qt::ZoomNativeGesture) {
+        double value = native->value();
+        if (native->gestureType() == Qt::ZoomNativeGesture) {
+            if (std::fabs(value) < 1.0e-12) {
+                value = native->delta().y();
+            }
+            // Qt documents this as percent; Cocoa delivers a small scale increment
+            // used as scale *= (1 + value).
+            if (std::fabs(value) > 0.5) {
+                value /= 100.0;
+            }
+        }
+        const SbVec2s pos = InputDevice::toDevicePixelPosition(
+            this->widget->mapFromGlobal(native->globalPosition()),
+            SbVec2s(
+                static_cast<short>(this->widget->width()),
+                static_cast<short>(this->widget->height())
+            ),
+            this->widget->devicePixelRatio()
+        );
+        if (!this->nativePinch.update(native->gestureType(), value, pos)) {
             return nullptr;
         }
-
-        qreal mag = native->value();
-        if (std::fabs(mag) < 1.0e-12) {
-            mag = native->delta().y();
-        }
-        // Qt documents this as percent; Cocoa delivers a small scale increment
-        // used as scale *= (1 + value).
-        if (std::fabs(mag) > 0.5) {
-            mag /= 100.0;
-        }
-
-        auto* pinch = new SoGesturePinchEvent();
-        pinch->deltaZoom = 1.0 + mag;
-        if (pinch->deltaZoom < 0.01) {
-            pinch->deltaZoom = 0.01;
-        }
-        pinch->totalZoom = pinch->deltaZoom;
-        pinch->deltaAngle = 0.0;
-        pinch->totalAngle = 0.0;
-        pinch->state = SoGestureEvent::SbGSUpdate;
-
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-        const QPointF localPos = native->position();
-#else
-        const QPointF localPos = native->pos();
-#endif
-        const qreal dpr = this->widget->devicePixelRatioF();
-        const SbVec2s win(
-            static_cast<short>(this->widget->width()),
-            static_cast<short>(this->widget->height())
-        );
-        const SbVec2s coinPos = Quarter::InputDevice::toDevicePixelPosition(localPos, win, dpr);
-        pinch->setPosition(coinPos);
-        pinch->curCenter = SbVec2f(static_cast<float>(coinPos[0]), static_cast<float>(coinPos[1]));
-        pinch->startCenter = pinch->curCenter;
-        pinch->deltaCenter = SbVec2f(0.0f, 0.0f);
-
-        const Qt::KeyboardModifiers mods = native->modifiers();
-        pinch->setShiftDown(mods.testFlag(Qt::ShiftModifier));
-        pinch->setCtrlDown(mods.testFlag(Qt::ControlModifier));
-        pinch->setAltDown(mods.testFlag(Qt::AltModifier));
-        pinch->setTime(SbTime::getTimeOfDay());
         native->accept();
-        return pinch;
+        return &this->nativePinch.event();
     }
+#endif
 
     if (event->type() == QEvent::Gesture || event->type() == QEvent::GestureOverride) {
         auto gevent = static_cast<QGestureEvent*>(event);

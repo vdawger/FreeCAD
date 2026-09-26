@@ -137,7 +137,8 @@ void FeatureAddSub::updatePreviewShape()
     const auto notifyWarning = [](const QString& message) {
         Base::Console().translatedUserWarning(
             "Preview",
-            tr("Failure while computing removed volume preview: %1").arg(message).toUtf8()
+            "{}",
+            tr("Failure while computing removed volume preview: %1").arg(message).toStdString()
         );
     };
 
@@ -180,8 +181,7 @@ void FeatureAddSub::updatePreviewShape()
                            "removed or a problem with the model.")
                     );
                 }
-                // Common keeps the overlap, so its removed-volume preview is outside the tool.
-                PreviewShape.setValue(keepCommon ? cut : common);
+                PreviewShape.setValue(common);
                 return;
             }
             catch (Standard_Failure& e) {

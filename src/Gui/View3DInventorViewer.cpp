@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 
 #include <Inventor/SoFCPlacementIndicatorKit.h>
 
@@ -38,8 +39,6 @@
 # include <GL/glext.h>
 # include <GL/glu.h>
 #endif
-
-#include <fmt/format.h>
 
 #include <algorithm>
 #include <array>
@@ -132,6 +131,7 @@
 #include "Inventor/SoAxisCrossKit.h"
 #include "Inventor/SoFCBackgroundGradient.h"
 #include "Inventor/SoFCBoundingBox.h"
+#include "Inventor/SoMouseWheelEvent.h"
 #include "MainWindow.h"
 #include "Multisample.h"
 #include "NaviCube.h"
@@ -223,7 +223,7 @@ QString dimensionText(const View3DInventorViewer& viewer)
         auto hStr = Base::UnitsApi::schemaTranslate(qHeight);
 
         // Create final string and update window
-        dim = fmt::format("{} x {}", wStr, hStr);
+        dim = std::format("{} x {}", wStr, hStr);
     }
 
     return QString::fromStdString(dim);
@@ -255,11 +255,7 @@ void clearDimensionPaneState()
 
 int qImageByteCount(const QImage& image)
 {
-#if QT_VERSION >= QT_VERSION_CHECK(5, 10, 0)
     return static_cast<int>(image.sizeInBytes());
-#else
-    return image.byteCount();
-#endif
 }
 
 void setOverlayCacheContext(SoGLRenderAction& action, const View3DInventorViewer* viewer)
@@ -797,6 +793,20 @@ private:
     QPoint pressPosition;
     View3DInventorViewer* currentViewer = nullptr;
 
+    static bool isUnwantedHorizontalScroll(const QWheelEvent* event)
+    {
+        const bool touchpad = SoMouseWheelEvent::isPreciseScroll(
+            !event->pixelDelta().isNull(),
+            event->phase() != Qt::NoScrollPhase
+        );
+        // Blender trackpad uses horizontal two-finger motion for orbit and pan.
+        if (touchpad
+            && (NavigationStyle::touchpadScrollPans() || NavigationStyle::blenderTrackpadPref())) {
+            return false;
+        }
+        return qAbs(event->angleDelta().x()) > qAbs(event->angleDelta().y());
+    }
+
 public:
     bool eventFilter(QObject* obj, QEvent* event) override
     {
@@ -806,8 +816,7 @@ public:
         // events; those are 2D gestures, not mouse-wheel ticks.
         if (event->type() == QEvent::Wheel) {
             auto we = static_cast<QWheelEvent*>(event);  // NOLINT
-            if (we->pixelDelta().isNull()
-                && qAbs(we->angleDelta().x()) > qAbs(we->angleDelta().y())) {
+            if (isUnwantedHorizontalScroll(we)) {
                 return true;
             }
         }
@@ -1296,6 +1305,8 @@ void View3DInventorViewer::init()
 #ifdef Q_OS_MACOS
         // Pinch must be grabbed on the OpenGL viewport or Qt never synthesizes
         // QPinchGesture / may not deliver native magnify to the 3D view.
+        // Pan is intentionally not grabbed: two-finger scroll is a wheel event
+        // on macOS, and a pan gesture would steal orbit from the trackpad mapping.
         this->grabGesture(Qt::PinchGesture);
         if (QWidget* vp = this->viewport()) {
             vp->grabGesture(Qt::PinchGesture);
@@ -1307,7 +1318,7 @@ void View3DInventorViewer::init()
 #endif
     }
     catch (Base::Exception& e) {
-        Base::Console().warning("Failed to set up gestures. Error: %s\n", e.what());
+        Base::Console().warning("Failed to set up gestures. Error: {}\n", e.what());
     }
     catch (...) {
         Base::Console().warning("Failed to set up gestures. Unknown error.\n");
@@ -2063,7 +2074,7 @@ void View3DInventorViewer::updateFPSLabel()
 
     fpsCounter->setText(
         QString::fromStdString(
-            fmt::format("{:.1f} ms / {:.1f} fps", framesPerSecond[0], framesPerSecond[1])
+            std::format("{:.1f} ms / {:.1f} fps", framesPerSecond[0], framesPerSecond[1])
         )
     );
 
@@ -2871,7 +2882,7 @@ void View3DInventorViewer::interactionFinishCB(void* ud, SoQTQuarterAdaptor* vie
 void View3DInventorViewer::interactionLoggerCB(void* ud, SoAction* action)
 {
     Q_UNUSED(ud)
-    Base::Console().log("%s\n", action->getTypeId().getName().getString());
+    Base::Console().log("{}\n", action->getTypeId().getName().getString());
 }
 
 void View3DInventorViewer::addGraphicsItem(GLGraphicsItem* item)
@@ -3072,12 +3083,16 @@ QImage View3DInventorViewer::renderToImage(const RenderImageOptions& options)
     // is to use a certain background color using GL_RGB as texture
     // format and in the output image search for the above color and
     // replaces it with the color requested by the user.
-    fboFormat.setInternalTextureFormat(getInternalTextureFormat());
+    const bool perPixelAlpha = options.alphaMode == AlphaMode::PerPixel;
+    // The InternalTextureFormat preference cannot express "must carry alpha".
+    fboFormat.setInternalTextureFormat(
+        perPixelAlpha ? static_cast<GLenum>(GL_RGBA8) : getInternalTextureFormat()
+    );
 
     QOpenGLFramebufferObject fbo(width, height, fboFormat);
     if (!fbo.isValid()) {
         Base::Console().warning(
-            "renderToImage failed to create a %dx%d framebuffer with %d samples\n",
+            "renderToImage failed to create a {}x{} framebuffer with {} samples\n",
             width,
             height,
             samples
@@ -3086,9 +3101,10 @@ QImage View3DInventorViewer::renderToImage(const RenderImageOptions& options)
     }
 
     constexpr const int maxAlpha = 255;
-    int alpha = maxAlpha;
     QColor opaqueBackground = options.background;
     const bool overrideBackground = opaqueBackground.isValid();
+    const bool keyOutBackground = overrideBackground && opaqueBackground.alpha() < maxAlpha
+        && !perPixelAlpha;
     const QColor previousBackground = backgroundColor();
     const Background previousGradient = getGradientBackground();
     auto restoreBackground = qScopeGuard(
@@ -3101,16 +3117,15 @@ QImage View3DInventorViewer::renderToImage(const RenderImageOptions& options)
     );
 
     if (overrideBackground) {
-        // force an opaque background color
-        alpha = opaqueBackground.alpha();
-        if (alpha < maxAlpha) {
+        if (keyOutBackground) {
+            // force an opaque background color for the keying pass to match against
             opaqueBackground.setRgb(maxAlpha, maxAlpha, maxAlpha);
         }
         setBackgroundColor(opaqueBackground);
         setGradientBackground(Background::NoGradient);
     }
 
-    if (!renderToFramebuffer(&fbo, options.includeViewerLighting)) {
+    if (!renderToFramebuffer(&fbo, options)) {
         return {};
     }
     img = fbo.toImage();
@@ -3119,8 +3134,12 @@ QImage View3DInventorViewer::renderToImage(const RenderImageOptions& options)
         return {};
     }
 
-    // if background color isn't opaque manipulate the image
-    if (alpha < maxAlpha) {
+    if (perPixelAlpha) {
+        // The framebuffer already carries per-pixel alpha, so neither post-pass applies.
+        return img;
+    }
+
+    if (keyOutBackground) {
         QImage image(img.constBits(), img.width(), img.height(), QImage::Format_ARGB32);
         img = image.copy();
         QRgb rgba = options.background.rgba();
@@ -3135,7 +3154,7 @@ QImage View3DInventorViewer::renderToImage(const RenderImageOptions& options)
             }
         }
     }
-    else if (alpha == maxAlpha) {
+    else {
         QImage image(img.width(), img.height(), QImage::Format_RGB32);
         QPainter painter(&image);
         painter.fillRect(image.rect(), Qt::black);
@@ -3147,7 +3166,34 @@ QImage View3DInventorViewer::renderToImage(const RenderImageOptions& options)
     return img;
 }
 
-bool View3DInventorViewer::renderToFramebuffer(QOpenGLFramebufferObject* fbo, bool includeViewerLighting)
+SoSeparator* View3DInventorViewer::buildCaptureRoot(const RenderImageOptions& options) const
+{
+    // Skipping the render manager's scene graph leaves the placement indicator, the rotation
+    // center and the viewer's own camera out of the capture.
+    auto root = new SoSeparator;
+
+    if (options.includeViewerLighting) {
+        root->addChild(getHeadlight());
+        root->addChild(getBacklight());
+        root->addChild(getFillLight());
+        root->addChild(environment);
+    }
+
+    root->addChild(options.camera);
+    root->addChild(pcViewProviderRoot);
+
+    return root;
+}
+
+bool View3DInventorViewer::renderToFramebuffer(QOpenGLFramebufferObject* fbo)
+{
+    return renderToFramebuffer(fbo, RenderImageOptions {});
+}
+
+bool View3DInventorViewer::renderToFramebuffer(
+    QOpenGLFramebufferObject* fbo,
+    const RenderImageOptions& options
+)
 {
     static_cast<QOpenGLWidget*>(this->viewport())->makeCurrent();  // NOLINT
     if (!fbo->bind()) {
@@ -3183,7 +3229,11 @@ bool View3DInventorViewer::renderToFramebuffer(QOpenGLFramebufferObject* fbo, bo
     // while creating a new render action has it set to GL_LEQUAL. So, in order to get
     // the exact same result set it explicitly to GL_LESS.
     glDepthFunc(GL_LESS);
-    if (includeViewerLighting) {
+    if (options.camera) {
+        const CoinPtr<SoSeparator> captureRoot(buildCaptureRoot(options));
+        gl.apply(captureRoot);
+    }
+    else if (options.includeViewerLighting) {
         gl.apply(this->getSoRenderManager()->getSceneGraph());
     }
     else {

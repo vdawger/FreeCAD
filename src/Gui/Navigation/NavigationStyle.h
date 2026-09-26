@@ -265,6 +265,31 @@ public:
     virtual SbBool processWheelEvent(const SoMouseWheelEvent* const event);
     SbBool processBlenderTrackpadWheel(const SoMouseWheelEvent* const event);
     SbBool processBlenderTrackpadPinch(const SoGesturePinchEvent* const event);
+    virtual SbBool processPinchEvent(const SoGesturePinchEvent* const event);
+
+    struct PinchAction
+    {
+        bool zoom = false;
+        float zoomLogFactor = 0.0F;
+        bool rotate = false;
+        float rotateAngle = 0.0F;
+    };
+
+    static PinchAction pinchAction(const SoGesturePinchEvent* const event, bool touchTiltDisabled);
+
+    enum class WheelAction
+    {
+        Zoom,
+        Pan,
+        Orbit
+    };
+
+    static WheelAction wheelAction(bool preciseDevice, bool scrollPans, bool shiftDown, bool ctrlDown);
+
+    static bool touchpadScrollPansByDefault();
+    static bool touchpadScrollPans();
+    static bool blenderTrackpadByDefault();
+    static bool blenderTrackpadPref();
 
     void setPopupMenuEnabled(const SbBool on);
     SbBool isPopupMenuEnabled() const;

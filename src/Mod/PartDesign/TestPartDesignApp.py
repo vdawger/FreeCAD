@@ -46,6 +46,8 @@ from PartDesignTests.TestHelix import TestHelix
 from PartDesignTests.TestMirrored import TestMirrored
 from PartDesignTests.TestLinearPattern import TestLinearPattern
 from PartDesignTests.TestCircularPattern import TestCircularPattern
+from PartDesignTests.TestPathPattern import TestPathPattern
+from PartDesignTests.TestPointPattern import TestPointPattern
 from PartDesignTests.TestPolarPattern import TestPolarPattern
 from PartDesignTests.TestMultiTransform import TestMultiTransform
 from PartDesignTests.TestBoolean import TestBoolean
