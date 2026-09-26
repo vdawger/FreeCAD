@@ -515,7 +515,11 @@ std::optional<T> valueAs(const std::optional<Value>& value)
 template<>
 struct std::formatter<Gui::StyleParameters::Value>: std::formatter<std::string>
 {
-    auto format(const Gui::StyleParameters::Value& value, std::format_context& ctx) const
+    // libc++ checks formattability with basic_format_context<char*, char>, not
+    // std::format_context. A non-template format() that only accepts the latter
+    // makes Value unformattable and std::format's consteval check fails.
+    template<typename FormatContext>
+    auto format(const Gui::StyleParameters::Value& value, FormatContext& ctx) const
     {
         return std::formatter<std::string>::format(value.toString(), ctx);
     }
