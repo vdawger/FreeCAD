@@ -1321,6 +1321,78 @@ class TaskPanel:
             return False
         return False
 
+    def _makeExportArrayEditor(self, loader, class_name, parent):
+        """Create a Gui spin box parented to the array group.
+
+        An unparented widget from UiLoader can already be deleted by the time
+        the next line runs, which aborts the whole Output-tab setup.
+        """
+        widget = None
+        try:
+            widget = loader.createWidget(class_name, parent)
+        except Exception:
+            widget = None
+        if widget is not None:
+            try:
+                if widget.parentWidget() is not parent:
+                    widget.setParent(parent)
+                widget.objectName()
+            except RuntimeError:
+                widget = None
+        if widget is None:
+            if "Quantity" in class_name:
+                widget = QtGui.QDoubleSpinBox(parent)
+            else:
+                widget = QtGui.QSpinBox(parent)
+        return widget
+
+    def _export_array_insert_row(self, grid):
+        """Blank row above the work-coordinate group.
+
+        PathEdit puts that group on row 4 and a 747px spacer on row 5.
+        Appending at rowCount() places the array under the spacer, past the
+        region the task panel shows.
+        """
+        occupied = set()
+        wcs_row = None
+        wcs = getattr(self.form, "groupBox_7", None)
+        for index in range(grid.count()):
+            item = grid.itemAt(index)
+            if item is None or item.widget() is None:
+                continue
+            row, _column, rowspan, _colspan = grid.getItemPosition(index)
+            for used in range(row, row + max(1, rowspan)):
+                occupied.add(used)
+            if item.widget() is wcs:
+                wcs_row = row
+        if wcs_row is not None:
+            for row in range(wcs_row - 1, -1, -1):
+                if row not in occupied:
+                    return row
+        for row in range(grid.rowCount() + 1):
+            if row not in occupied:
+                return row
+        return 0
+
+    def _collapse_output_tab_spacer(self, grid):
+        for index in range(grid.count()):
+            item = grid.itemAt(index)
+            spacer = item.spacerItem() if item is not None else None
+            if spacer is None:
+                continue
+            spacer.changeSize(
+                0,
+                0,
+                QtGui.QSizePolicy.Minimum,
+                QtGui.QSizePolicy.Minimum,
+            )
+        wcs = getattr(self.form, "groupBox_7", None)
+        if wcs is not None:
+            wcs.setSizePolicy(
+                QtGui.QSizePolicy.Preferred,
+                QtGui.QSizePolicy.Preferred,
+            )
+
     def _setupExportArrayUi(self):
         """Add Export Array controls to the Output tab (not in the compiled .ui)."""
         from Path.Post.ExportArray import ensure_job_properties
@@ -1336,6 +1408,7 @@ class TaskPanel:
             return
 
         group = QtGui.QGroupBox(translate("CAM_Job", "Export Array"))
+        group.setSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Minimum)
         form = QtGui.QFormLayout(group)
 
         self.form.exportArrayEnabled = QtGui.QCheckBox(
@@ -1351,8 +1424,12 @@ class TaskPanel:
         form.addRow(self.form.exportArrayEnabled)
 
         loader = FreeCADGui.UiLoader()
+        # UiLoader owns widgets it creates until they have a parent.
+        self._exportArrayLoader = loader
 
-        self.form.exportArrayCountX = loader.createWidget("Gui::IntSpinBox")
+        self.form.exportArrayCountX = self._makeExportArrayEditor(
+            loader, "Gui::IntSpinBox", group
+        )
         self.form.exportArrayCountX.setMinimum(0)
         self.form.exportArrayCountX.setMaximum(999)
         self.form.exportArrayCountX.setToolTip(
@@ -1364,7 +1441,9 @@ class TaskPanel:
         )
         form.addRow(translate("CAM_Job", "Copies X"), self.form.exportArrayCountX)
 
-        self.form.exportArrayCountY = loader.createWidget("Gui::IntSpinBox")
+        self.form.exportArrayCountY = self._makeExportArrayEditor(
+            loader, "Gui::IntSpinBox", group
+        )
         self.form.exportArrayCountY.setMinimum(0)
         self.form.exportArrayCountY.setMaximum(999)
         self.form.exportArrayCountY.setToolTip(
@@ -1376,14 +1455,18 @@ class TaskPanel:
         )
         form.addRow(translate("CAM_Job", "Copies Y"), self.form.exportArrayCountY)
 
-        self.form.exportArrayOffsetX = loader.createWidget("Gui::QuantitySpinBox")
+        self.form.exportArrayOffsetX = self._makeExportArrayEditor(
+            loader, "Gui::QuantitySpinBox", group
+        )
         self.form.exportArrayOffsetX.setProperty("unit", "mm")
         self.form.exportArrayOffsetX.setToolTip(
             translate("CAM_Job", "Spacing between columns. Accepts values or expressions.")
         )
         form.addRow(translate("CAM_Job", "X pitch"), self.form.exportArrayOffsetX)
 
-        self.form.exportArrayOffsetY = loader.createWidget("Gui::QuantitySpinBox")
+        self.form.exportArrayOffsetY = self._makeExportArrayEditor(
+            loader, "Gui::QuantitySpinBox", group
+        )
         self.form.exportArrayOffsetY.setProperty("unit", "mm")
         self.form.exportArrayOffsetY.setToolTip(
             translate("CAM_Job", "Spacing between rows. Accepts values or expressions.")
@@ -1409,7 +1492,9 @@ class TaskPanel:
         self.form.exportArrayGrid.maskChanged.connect(self._exportArrayMaskChanged)
         form.addRow(self.form.exportArrayGrid)
 
-        self.form.exportArrayToolChangeTime = loader.createWidget("Gui::QuantitySpinBox")
+        self.form.exportArrayToolChangeTime = self._makeExportArrayEditor(
+            loader, "Gui::QuantitySpinBox", group
+        )
         self.form.exportArrayToolChangeTime.setProperty("unit", "s")
         self.form.exportArrayToolChangeTime.setToolTip(
             translate(
@@ -1429,9 +1514,14 @@ class TaskPanel:
         form.addRow(self.form.exportArrayJobTime)
         self._bindToolChangeTimeWidget()
 
-        # Append on the Output tab. A fixed row collides on some job panels
-        # and the group is then created but not visible.
-        grid.addWidget(group, grid.rowCount(), 0, 1, max(1, grid.columnCount()))
+        self._collapse_output_tab_spacer(grid)
+        grid.addWidget(
+            group,
+            self._export_array_insert_row(grid),
+            0,
+            1,
+            max(1, grid.columnCount()),
+        )
 
         self.form.exportArrayEnabled.toggled.connect(self._exportArrayToggled)
         self.form.exportArrayEnabled.toggled.connect(self.getFields)
@@ -2262,7 +2352,10 @@ class TaskPanel:
         self.form.postProcessorArguments.editingFinished.connect(self.getFields)
         self.form.postProcessorOutputFile.editingFinished.connect(self.getFields)
         self.form.postProcessorSetOutputFile.clicked.connect(self.setPostProcessorOutputFile)
-        self._setupExportArrayUi()
+        try:
+            self._setupExportArrayUi()
+        except Exception as exc:
+            Path.Log.error(f"Export array panel was not added: {exc}")
 
         # Workplan
         self.form.operationsList.itemSelectionChanged.connect(self.operationSelect)
