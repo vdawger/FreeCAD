@@ -204,6 +204,9 @@ struct GeometryScreenPreselector
 
         for (int layerIndex = 0; layerIndex < geometryLayerParameters.getCoinLayerCount();
              ++layerIndex) {
+            if (layerIndex >= static_cast<int>(editModeScenegraphNodes.PointsCoordinate.size())) {
+                continue;
+            }
             SoCoordinate3* coords = editModeScenegraphNodes.PointsCoordinate[layerIndex];
             if (!coords) {
                 continue;
@@ -211,6 +214,12 @@ struct GeometryScreenPreselector
 
             int pointCount = coords->point.getNum();
             for (int pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
+                // The coordinate node keeps a default point before the first draw
+                // fills the index maps. The geo table can also be ahead of the
+                // vertex table while a redraw is in progress.
+                if (!coinMapping.isValidPointId(pointIndex, layerIndex)) {
+                    continue;
+                }
                 int vertexId = coinMapping.getPointVertexId(pointIndex, layerIndex);
                 if (vertexId < 0) {
                     continue;

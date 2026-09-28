@@ -625,6 +625,8 @@ void EditModeGeometryCoinManager::updateGeometryLayersConfiguration()
     // TODO: Quite some room for improvement here:
     geometryLayerParameters.setCoinLayerCount(viewProvider.VisualLayerList.getSize());
 
+    // New marker nodes are pickable before the next draw rebuilds the index maps.
+    coinMapping.clear();
     emptyGeometryRootNodes();
     // Those vectors hold raw pointers into the nodes just removed. Leaving them
     // makes the next create append, so layer 0 is a freed node.

@@ -24,6 +24,8 @@
 
 #include <FCConfig.h>
 
+#include <utility>
+
 #include <Base/Console.h>
 #include <Base/Exception.h>
 
@@ -64,7 +66,10 @@ void EditModeGeometryCoinConverter::convert(const Sketcher::GeoListFacade& geoli
     Coords.clear();
     Index.clear();
 
-    coinMapping.clear();
+    // Fill a private map and publish it in one assignment. Showing the support
+    // solid redraws the sketch while the cursor is still over the view, and a
+    // preselection pass must not see one table filled and another still empty.
+    CoinMapping staging;
 
     pointCounter.clear();
 
@@ -73,20 +78,20 @@ void EditModeGeometryCoinConverter::convert(const Sketcher::GeoListFacade& geoli
         Coords.emplace_back();
         Index.emplace_back();
 
-        coinMapping.CurvIdToGeoId.emplace_back();
+        staging.CurvIdToGeoId.emplace_back();
         for (int t = 0; t < geometryLayerParameters.getSubLayerCount(); t++) {
             Coords[l].emplace_back();
             Index[l].emplace_back();
-            coinMapping.CurvIdToGeoId[l].emplace_back();
+            staging.CurvIdToGeoId[l].emplace_back();
         }
-        coinMapping.PointIdToGeoId.emplace_back();
-        coinMapping.PointIdToPosId.emplace_back();
-        coinMapping.PointIdToVertexId.emplace_back();
+        staging.PointIdToGeoId.emplace_back();
+        staging.PointIdToPosId.emplace_back();
+        staging.PointIdToVertexId.emplace_back();
     }
 
     pointCounter.resize(geometryLayerParameters.getCoinLayerCount(), 0);
 
-    auto setTracking = [this](
+    auto setTracking = [&](
                            int geoId,
                            int coinLayer,
                            EditModeGeometryCoinConverter::PointsMode pointmode,
@@ -129,17 +134,17 @@ void EditModeGeometryCoinConverter::convert(const Sketcher::GeoListFacade& geoli
                 }
 
                 // Map: (GeoId, PosId) -> (physicalIndex, layer)
-                coinMapping.GeoElementId2SetId.emplace(
+                staging.GeoElementId2SetId.emplace(
                     std::piecewise_construct,
                     std::forward_as_tuple(geoId, pos),
                     std::forward_as_tuple(pointCounter[coinLayer]++, coinLayer)
                 );
 
                 // Map: physicalIndex -> logical info
-                coinMapping.PointIdToGeoId[coinLayer].push_back(geoId);
-                coinMapping.PointIdToPosId[coinLayer].push_back(pos);
+                staging.PointIdToGeoId[coinLayer].push_back(geoId);
+                staging.PointIdToPosId[coinLayer].push_back(pos);
                 // This is the key: store the correct, globally-incremented logical VertexId.
-                coinMapping.PointIdToVertexId[coinLayer].push_back(vertexCounter);
+                staging.PointIdToVertexId[coinLayer].push_back(vertexCounter);
             }
 
             // ALWAYS increment the logical vertex counter to stay in sync with SketchObject.
@@ -147,11 +152,11 @@ void EditModeGeometryCoinConverter::convert(const Sketcher::GeoListFacade& geoli
         }
 
         if (numberCurves > 0) {  // insert the first segment of the curve into the map
-            coinMapping.GeoElementId2SetId.emplace(
+            staging.GeoElementId2SetId.emplace(
                 std::piecewise_construct,
                 std::forward_as_tuple(geoId, Sketcher::PointPos::none),
                 std::forward_as_tuple(
-                    static_cast<int>(coinMapping.CurvIdToGeoId[coinLayer][sublayer].size()),
+                    static_cast<int>(staging.CurvIdToGeoId[coinLayer][sublayer].size()),
                     coinLayer,
                     sublayer
                 )
@@ -159,7 +164,7 @@ void EditModeGeometryCoinConverter::convert(const Sketcher::GeoListFacade& geoli
         }
 
         for (int i = 0; i < numberCurves; i++) {
-            coinMapping.CurvIdToGeoId[coinLayer][sublayer].push_back(geoId);
+            staging.CurvIdToGeoId[coinLayer][sublayer].push_back(geoId);
         }
     };
 
@@ -275,6 +280,8 @@ void EditModeGeometryCoinConverter::convert(const Sketcher::GeoListFacade& geoli
             bsplineGeoIds.push_back(GeoId);
         }
     }
+
+    coinMapping = std::move(staging);
 
     // Coin Nodes Editing
     int vOrFactor = ViewProviderSketchCoinAttorney::getViewOrientationFactor(viewProvider);

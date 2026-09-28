@@ -548,11 +548,16 @@ struct CoinMapping
 
     bool isValidCurveId(int curveindex, int layerindex, int sublayerindex = 0) const
     {
-        // clang-format off
-        return static_cast<int>(CurvIdToGeoId.size()) > layerindex &&
-               static_cast<int>(CurvIdToGeoId[layerindex].size()) > sublayerindex &&
-               static_cast<int>(CurvIdToGeoId[layerindex][sublayerindex].size()) > curveindex;
-        // clang-format on
+        // A negative index compares less than every size, so a signed test would
+        // accept it and the following subscript would walk off the front of the table.
+        if (curveindex < 0 || layerindex < 0 || sublayerindex < 0) {
+            return false;
+        }
+        const auto layer = static_cast<size_t>(layerindex);
+        const auto sublayer = static_cast<size_t>(sublayerindex);
+        const auto curve = static_cast<size_t>(curveindex);
+        return CurvIdToGeoId.size() > layer && CurvIdToGeoId[layer].size() > sublayer
+            && CurvIdToGeoId[layer][sublayer].size() > curve;
     }
 
     /// given the MF index of a point and the coin layer in which it is drawn returns the GeoId of
@@ -564,10 +569,17 @@ struct CoinMapping
 
     bool isValidPointId(int pointindex, int layerindex) const
     {
-        // clang-format off
-        return static_cast<int>(PointIdToGeoId.size()) > layerindex &&
-               static_cast<int>(PointIdToGeoId[layerindex].size()) > pointindex;
-        // clang-format on
+        // Geo, position, and vertex tables are written as a set. Readers index all
+        // three. Checking only the geo table lets a vertex lookup run against an
+        // empty vector, which is a null dereference at layer 0.
+        if (pointindex < 0 || layerindex < 0) {
+            return false;
+        }
+        const auto layer = static_cast<size_t>(layerindex);
+        const auto point = static_cast<size_t>(pointindex);
+        return PointIdToGeoId.size() > layer && PointIdToGeoId[layer].size() > point
+            && PointIdToPosId.size() > layer && PointIdToPosId[layer].size() > point
+            && PointIdToVertexId.size() > layer && PointIdToVertexId[layer].size() > point;
     }
 
     /// given the MF index of a point and the coin layer in which it is drawn returns the PosId of
