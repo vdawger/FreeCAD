@@ -626,6 +626,15 @@ void EditModeGeometryCoinManager::updateGeometryLayersConfiguration()
     geometryLayerParameters.setCoinLayerCount(viewProvider.VisualLayerList.getSize());
 
     emptyGeometryRootNodes();
+    // Those vectors hold raw pointers into the nodes just removed. Leaving them
+    // makes the next create append, so layer 0 is a freed node.
+    editModeScenegraphNodes.PointsMaterials.clear();
+    editModeScenegraphNodes.PointsCoordinate.clear();
+    editModeScenegraphNodes.PointsDrawStyle.clear();
+    editModeScenegraphNodes.PointSet.clear();
+    editModeScenegraphNodes.CurvesMaterials.clear();
+    editModeScenegraphNodes.CurvesCoordinate.clear();
+    editModeScenegraphNodes.CurveSet.clear();
     createEditModePointInventorNodes();
     createEditModeCurveInventorNodes();
 }

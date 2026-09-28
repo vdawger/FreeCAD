@@ -1312,18 +1312,36 @@ bool EditModeCoinManager::detectPointPreselection(
     PreselectionResult& result
 )
 {
-    SoPath* path = point->getPath();
-    SoNode* tail = path->getTail();
-    if (tail != editModeScenegraphNodes.PointSet[layerIndex]) {
+    if (!point || layerIndex < 0
+        || layerIndex >= static_cast<int>(editModeScenegraphNodes.PointSet.size())) {
         return false;
     }
 
-    const SoDetail* pointDetail = point->getDetail(editModeScenegraphNodes.PointSet[layerIndex]);
+    SoMarkerSet* pointSet = editModeScenegraphNodes.PointSet[layerIndex];
+    if (!pointSet) {
+        return false;
+    }
+
+    SoPath* path = point->getPath();
+    if (!path) {
+        return false;
+    }
+    SoNode* tail = path->getTail();
+    if (tail != pointSet) {
+        return false;
+    }
+
+    const SoDetail* pointDetail = point->getDetail(pointSet);
     if (!pointDetail || pointDetail->getTypeId() != SoPointDetail::getClassTypeId()) {
         return false;
     }
 
     int pointIndex = static_cast<const SoPointDetail*>(pointDetail)->getCoordinateIndex();
+    // The marker can be picked as soon as the edit scene exists. The index map
+    // is filled later, on the first draw. Indexing it before then is a null deref.
+    if (!coinMapping.isValidPointId(pointIndex, layerIndex)) {
+        return false;
+    }
     result.PointIndex = coinMapping.getPointVertexId(pointIndex, layerIndex);
     if (result.PointIndex == -1) {
         result.Kind = PreselectionResult::HitKind::Axis;
@@ -1343,23 +1361,36 @@ bool EditModeCoinManager::detectCurvePreselection(
     PreselectionResult& result
 )
 {
+    if (!point || layerIndex < 0
+        || layerIndex >= static_cast<int>(editModeScenegraphNodes.CurveSet.size())) {
+        return false;
+    }
+
     SoPath* path = point->getPath();
+    if (!path) {
+        return false;
+    }
     SoNode* tail = path->getTail();
 
     for (int subLayerIndex = 0; subLayerIndex < geometryLayerParameters.getSubLayerCount();
          ++subLayerIndex) {
-        if (tail != editModeScenegraphNodes.CurveSet[layerIndex][subLayerIndex]) {
+        if (subLayerIndex >= static_cast<int>(editModeScenegraphNodes.CurveSet[layerIndex].size())) {
+            break;
+        }
+        SoLineSet* curveSet = editModeScenegraphNodes.CurveSet[layerIndex][subLayerIndex];
+        if (!curveSet || tail != curveSet) {
             continue;
         }
 
-        const SoDetail* curveDetail = point->getDetail(
-            editModeScenegraphNodes.CurveSet[layerIndex][subLayerIndex]
-        );
+        const SoDetail* curveDetail = point->getDetail(curveSet);
         if (!curveDetail || curveDetail->getTypeId() != SoLineDetail::getClassTypeId()) {
             return false;
         }
 
         int curveIndex = static_cast<const SoLineDetail*>(curveDetail)->getLineIndex();
+        if (!coinMapping.isValidCurveId(curveIndex, layerIndex, subLayerIndex)) {
+            return false;
+        }
         result.GeoIndex = coinMapping.getCurveGeoId(curveIndex, layerIndex, subLayerIndex);
         result.Kind = PreselectionResult::HitKind::Edge;
         result.setPickedPoint(point);
