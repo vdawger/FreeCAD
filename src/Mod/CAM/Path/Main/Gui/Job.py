@@ -1114,11 +1114,15 @@ class TaskPanel:
 
             self.obj.Label = str(self.form.jobLabel.text())
             self.obj.Description = str(self.form.jobDescription.toPlainText())
-            self.obj.Operations.Group = [
-                self.form.operationsList.invisibleRootItem().child(i).data(self.DataObject, 0)
-                for i in range(self.form.operationsList.topLevelItemCount())
-            ]
-            self._getExportArrayFields()
+            # An empty or half-built tree must not replace a job that already
+            # has operations. That write pulls them out of the Operations group.
+            operations = self._operations_from_list()
+            if operations is not None:
+                self.obj.Operations.Group = operations
+            try:
+                self._getExportArrayFields()
+            except Exception as exc:
+                Path.Log.error(f"Export array values were not saved: {exc}")
             try:
                 self.obj.SplitOutput = self.form.splitOutput.isChecked()
                 self.obj.OrderOutputBy = str(self.form.orderBy.currentData())
@@ -1249,7 +1253,6 @@ class TaskPanel:
         self.form.postProcessorOutputFile.setText(self.obj.PostProcessorOutputFile)
         self.selectComboBoxText(self.form.postProcessor, self.obj.PostProcessor)
         self.form.postProcessorArguments.setText(self.obj.PostProcessorArgs)
-        self._setExportArrayFields()
         # self.obj.Proxy.onChanged(self.obj, "PostProcessor")
         self.updateTooltips()
 
@@ -1291,6 +1294,13 @@ class TaskPanel:
         tree.resizeColumnToContents(0)
         tree.blockSignals(False)
 
+        # After the tree is filled. A signal from the array editors calls
+        # getFields, and that must not see an empty operations list.
+        try:
+            self._setExportArrayFields()
+        except Exception as exc:
+            Path.Log.error(f"Export array fields were not filled: {exc}")
+
         self.form.jobModel.clear()
         for name, count in Counter(
             [self.obj.Proxy.baseObject(self.obj, o).Label for o in self.obj.Model.Group]
@@ -1306,45 +1316,176 @@ class TaskPanel:
         self.setupOps.setFields()
         self.populateMachineCombo()
 
-    def _export_array_on_output_tab(self):
-        box = getattr(self.form, "exportArrayEnabled", None)
-        tab = getattr(self.form, "tabOutput", None)
-        if box is None or tab is None:
+    _EXPORT_ARRAY_FORM_ATTRS = (
+        "exportArrayEnabled",
+        "exportArrayCountX",
+        "exportArrayCountY",
+        "exportArrayOffsetX",
+        "exportArrayOffsetY",
+        "exportArraySwapDirection",
+        "exportArrayGrid",
+        "exportArrayToolChangeTime",
+        "exportArrayJobTime",
+    )
+
+    def _qt_widget_alive(self, widget):
+        if widget is None:
             return False
         try:
-            widget = box
-            while widget is not None:
-                if widget is tab:
-                    return True
-                widget = widget.parentWidget()
+            widget.objectName()
         except RuntimeError:
             return False
-        return False
+        return True
+
+    def _operations_from_list(self):
+        """Operations currently shown in the tree.
+
+        None means leave Operations.Group unchanged. The tree is empty while
+        the job still has operations when export-array setup aborts before
+        setFields fills the list; writing that empty list ungroups them.
+        """
+        tree = getattr(self.form, "operationsList", None)
+        if not self._qt_widget_alive(tree):
+            return None
+        try:
+            count = tree.topLevelItemCount()
+            root = tree.invisibleRootItem()
+        except RuntimeError:
+            return None
+        operations = []
+        for index in range(count):
+            item = root.child(index)
+            if item is None:
+                return None
+            operation = item.data(self.DataObject, 0)
+            if operation is None:
+                return None
+            operations.append(operation)
+        current = []
+        group = getattr(self.obj, "Operations", None)
+        if group is not None:
+            try:
+                current = list(group.Group)
+            except Exception:
+                current = []
+        if not operations and current:
+            Path.Log.warning(
+                "Leaving job operations in place; the operations list was empty."
+            )
+            return None
+        return operations
+
+    def _export_array_on_output_tab(self):
+        """True when the Output tab already has a usable Export Array group.
+
+        parentWidget() returns a new wrapper, so identity checks against the
+        tab miss a group that is already parented and a second setupUi pass
+        builds another one.
+        """
+        tab = getattr(self.form, "tabOutput", None)
+        if not self._qt_widget_alive(tab):
+            return False
+        try:
+            group = tab.findChild(QtGui.QGroupBox, "exportArrayGroup")
+        except RuntimeError:
+            return False
+        if not self._qt_widget_alive(group):
+            return False
+        for name in (
+            "exportArrayEnabled",
+            "exportArrayCountX",
+            "exportArrayCountY",
+            "exportArrayOffsetX",
+            "exportArrayOffsetY",
+            "exportArraySwapDirection",
+        ):
+            if not self._qt_widget_alive(getattr(self.form, name, None)):
+                return False
+        return True
+
+    def _discard_export_array_attempt(self, tab):
+        """Drop a half-built Export Array group and its dead Python wrappers."""
+        try:
+            groups = tab.findChildren(QtGui.QGroupBox, "exportArrayGroup")
+        except RuntimeError:
+            groups = []
+        for group in groups:
+            if not self._qt_widget_alive(group):
+                continue
+            try:
+                group.hide()
+                group.setParent(None)
+                group.deleteLater()
+            except RuntimeError:
+                pass
+        for name in self._EXPORT_ARRAY_FORM_ATTRS:
+            if hasattr(self.form, name):
+                try:
+                    delattr(self.form, name)
+                except Exception:
+                    try:
+                        setattr(self.form, name, None)
+                    except Exception:
+                        pass
 
     def _makeExportArrayEditor(self, loader, class_name, parent):
-        """Create a Gui spin box parented to the array group.
+        """Create a Gui spin box and parent it before the next UiLoader call.
 
-        An unparented widget from UiLoader can already be deleted by the time
-        the next line runs, which aborts the whole Output-tab setup.
+        createWidget(class, parent) sometimes leaves the widget unparented.
+        The loader then deletes that widget when the next editor is created.
+        A plain QSpinBox cannot take an expression binding ("Wrong type") and
+        is not a substitute.
         """
-        widget = None
-        try:
-            widget = loader.createWidget(class_name, parent)
-        except Exception:
+        for _attempt in range(2):
             widget = None
-        if widget is not None:
             try:
-                if widget.parentWidget() is not parent:
-                    widget.setParent(parent)
+                widget = loader.createWidget(class_name)
+            except Exception as exc:
+                Path.Log.debug(f"createWidget {class_name}: {exc}")
+                widget = None
+            if widget is None:
+                continue
+            try:
+                widget.setParent(parent)
                 widget.objectName()
             except RuntimeError:
                 widget = None
-        if widget is None:
-            if "Quantity" in class_name:
-                widget = QtGui.QDoubleSpinBox(parent)
-            else:
-                widget = QtGui.QSpinBox(parent)
-        return widget
+                continue
+            return widget
+        Path.Log.error(f"Export array editor {class_name} was not created")
+        return None
+
+    def _connect_export_array_signal(self, widget, signal_name, slot):
+        if not self._qt_widget_alive(widget):
+            return
+        signal = getattr(widget, signal_name, None)
+        if signal is None:
+            return
+        try:
+            signal.connect(slot)
+        except Exception:
+            pass
+
+    @contextmanager
+    def _export_array_signals_blocked(self):
+        blocked = []
+        for name in self._EXPORT_ARRAY_FORM_ATTRS:
+            widget = getattr(self.form, name, None)
+            if not self._qt_widget_alive(widget):
+                continue
+            try:
+                widget.blockSignals(True)
+            except RuntimeError:
+                continue
+            blocked.append(widget)
+        try:
+            yield
+        finally:
+            for widget in blocked:
+                try:
+                    widget.blockSignals(False)
+                except RuntimeError:
+                    pass
 
     def _export_array_insert_row(self, grid):
         """Blank row above the work-coordinate group.
@@ -1398,21 +1539,37 @@ class TaskPanel:
         from Path.Post.ExportArray import ensure_job_properties
 
         ensure_job_properties(self.obj)
-        if self._export_array_on_output_tab():
-            return
         tab = getattr(self.form, "tabOutput", None)
-        if tab is None:
+        if not self._qt_widget_alive(tab):
+            return
+        if self._export_array_on_output_tab():
             return
         grid = tab.layout()
         if grid is None:
             return
+        # A failed attempt leaves deleted wrappers on the form. Drop those
+        # before building again so setFields does not touch a dead checkbox.
+        self._discard_export_array_attempt(tab)
 
-        group = QtGui.QGroupBox(translate("CAM_Job", "Export Array"))
+        # Parent the group and insert it before creating children. An exception
+        # while binding used to destroy the still-parentless group and every
+        # editor already stored on the form.
+        group = QtGui.QGroupBox(translate("CAM_Job", "Export Array"), tab)
+        group.setObjectName("exportArrayGroup")
         group.setSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Minimum)
+        self._collapse_output_tab_spacer(grid)
+        grid.addWidget(
+            group,
+            self._export_array_insert_row(grid),
+            0,
+            1,
+            max(1, grid.columnCount()),
+        )
         form = QtGui.QFormLayout(group)
 
         self.form.exportArrayEnabled = QtGui.QCheckBox(
-            translate("CAM_Job", "Array operations")
+            translate("CAM_Job", "Array operations"),
+            group,
         )
         self.form.exportArrayEnabled.setToolTip(
             translate(
@@ -1423,60 +1580,72 @@ class TaskPanel:
         )
         form.addRow(self.form.exportArrayEnabled)
 
-        loader = FreeCADGui.UiLoader()
-        # UiLoader owns widgets it creates until they have a parent.
-        self._exportArrayLoader = loader
+        loader = getattr(self, "_exportArrayLoader", None)
+        if loader is None:
+            loader = FreeCADGui.UiLoader()
+            # Keep the loader alive. It deletes an unparented widget on the
+            # next createWidget, and again when the loader itself is destroyed.
+            self._exportArrayLoader = loader
 
-        self.form.exportArrayCountX = self._makeExportArrayEditor(
-            loader, "Gui::IntSpinBox", group
-        )
-        self.form.exportArrayCountX.setMinimum(0)
-        self.form.exportArrayCountX.setMaximum(999)
-        self.form.exportArrayCountX.setToolTip(
+        self.form.exportArrayCountX = self._configure_export_array_editor(
+            form,
+            loader,
+            "Gui::IntSpinBox",
+            group,
+            translate("CAM_Job", "Copies X"),
             translate(
                 "CAM_Job",
                 "Extra copies in X, same as CAM Array CopiesX. Total columns = this + 1. "
                 "Use the formula button to bind a VarSet.",
-            )
+            ),
         )
-        form.addRow(translate("CAM_Job", "Copies X"), self.form.exportArrayCountX)
+        if self._qt_widget_alive(self.form.exportArrayCountX):
+            self.form.exportArrayCountX.setMinimum(0)
+            self.form.exportArrayCountX.setMaximum(999)
 
-        self.form.exportArrayCountY = self._makeExportArrayEditor(
-            loader, "Gui::IntSpinBox", group
-        )
-        self.form.exportArrayCountY.setMinimum(0)
-        self.form.exportArrayCountY.setMaximum(999)
-        self.form.exportArrayCountY.setToolTip(
+        self.form.exportArrayCountY = self._configure_export_array_editor(
+            form,
+            loader,
+            "Gui::IntSpinBox",
+            group,
+            translate("CAM_Job", "Copies Y"),
             translate(
                 "CAM_Job",
                 "Extra copies in Y, same as CAM Array CopiesY. Total rows = this + 1. "
                 "Use the formula button to bind a VarSet.",
-            )
+            ),
         )
-        form.addRow(translate("CAM_Job", "Copies Y"), self.form.exportArrayCountY)
+        if self._qt_widget_alive(self.form.exportArrayCountY):
+            self.form.exportArrayCountY.setMinimum(0)
+            self.form.exportArrayCountY.setMaximum(999)
 
-        self.form.exportArrayOffsetX = self._makeExportArrayEditor(
-            loader, "Gui::QuantitySpinBox", group
+        self.form.exportArrayOffsetX = self._configure_export_array_editor(
+            form,
+            loader,
+            "Gui::QuantitySpinBox",
+            group,
+            translate("CAM_Job", "X pitch"),
+            translate("CAM_Job", "Spacing between columns. Accepts values or expressions."),
         )
-        self.form.exportArrayOffsetX.setProperty("unit", "mm")
-        self.form.exportArrayOffsetX.setToolTip(
-            translate("CAM_Job", "Spacing between columns. Accepts values or expressions.")
-        )
-        form.addRow(translate("CAM_Job", "X pitch"), self.form.exportArrayOffsetX)
+        if self._qt_widget_alive(self.form.exportArrayOffsetX):
+            self.form.exportArrayOffsetX.setProperty("unit", "mm")
 
-        self.form.exportArrayOffsetY = self._makeExportArrayEditor(
-            loader, "Gui::QuantitySpinBox", group
+        self.form.exportArrayOffsetY = self._configure_export_array_editor(
+            form,
+            loader,
+            "Gui::QuantitySpinBox",
+            group,
+            translate("CAM_Job", "Y pitch"),
+            translate("CAM_Job", "Spacing between rows. Accepts values or expressions."),
         )
-        self.form.exportArrayOffsetY.setProperty("unit", "mm")
-        self.form.exportArrayOffsetY.setToolTip(
-            translate("CAM_Job", "Spacing between rows. Accepts values or expressions.")
-        )
-        form.addRow(translate("CAM_Job", "Y pitch"), self.form.exportArrayOffsetY)
+        if self._qt_widget_alive(self.form.exportArrayOffsetY):
+            self.form.exportArrayOffsetY.setProperty("unit", "mm")
 
         self._bindExportArrayWidgets()
 
         self.form.exportArraySwapDirection = QtGui.QCheckBox(
-            translate("CAM_Job", "Walk X before Y")
+            translate("CAM_Job", "Walk X before Y"),
+            group,
         )
         self.form.exportArraySwapDirection.setToolTip(
             translate(
@@ -1488,108 +1657,149 @@ class TaskPanel:
 
         from Path.Post.Gui.DlgExportArray import ExportArrayCellGrid
 
-        self.form.exportArrayGrid = ExportArrayCellGrid()
-        self.form.exportArrayGrid.maskChanged.connect(self._exportArrayMaskChanged)
+        self.form.exportArrayGrid = ExportArrayCellGrid(group)
         form.addRow(self.form.exportArrayGrid)
 
-        self.form.exportArrayToolChangeTime = self._makeExportArrayEditor(
-            loader, "Gui::QuantitySpinBox", group
-        )
-        self.form.exportArrayToolChangeTime.setProperty("unit", "s")
-        self.form.exportArrayToolChangeTime.setToolTip(
+        self.form.exportArrayToolChangeTime = self._configure_export_array_editor(
+            form,
+            loader,
+            "Gui::QuantitySpinBox",
+            group,
+            translate("CAM_Job", "Tool change time"),
             translate(
                 "CAM_Job",
                 "Time added for each tool change, including loading the first tool. "
                 "Tool changes follow operation order, not the number of array parts.",
-            )
+            ),
         )
-        form.addRow(
-            translate("CAM_Job", "Tool change time"),
-            self.form.exportArrayToolChangeTime,
-        )
+        if self._qt_widget_alive(self.form.exportArrayToolChangeTime):
+            self.form.exportArrayToolChangeTime.setProperty("unit", "s")
+        self._bindToolChangeTimeWidget()
 
-        self.form.exportArrayJobTime = QtGui.QLabel()
+        self.form.exportArrayJobTime = QtGui.QLabel(group)
         self.form.exportArrayJobTime.setWordWrap(True)
         self.form.exportArrayJobTime.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         form.addRow(self.form.exportArrayJobTime)
-        self._bindToolChangeTimeWidget()
 
-        self._collapse_output_tab_spacer(grid)
-        grid.addWidget(
-            group,
-            self._export_array_insert_row(grid),
-            0,
-            1,
-            max(1, grid.columnCount()),
+        # Fill values before connecting getFields. Walk-X and the pitch boxes
+        # emit while the operations tree is still empty on this first pass.
+        self._setExportArrayFields()
+        self._connect_export_array_signal(
+            self.form.exportArrayEnabled, "toggled", self._exportArrayToggled
         )
-
-        self.form.exportArrayEnabled.toggled.connect(self._exportArrayToggled)
-        self.form.exportArrayEnabled.toggled.connect(self.getFields)
-        self.form.exportArrayCountX.valueChanged.connect(self._exportArrayCountsChanged)
-        self.form.exportArrayCountY.valueChanged.connect(self._exportArrayCountsChanged)
-        self.form.exportArrayCountX.editingFinished.connect(self._exportArrayCountsChanged)
-        self.form.exportArrayCountY.editingFinished.connect(self._exportArrayCountsChanged)
-        self.form.exportArrayOffsetX.editingFinished.connect(self._exportArrayOffsetChanged)
-        self.form.exportArrayOffsetY.editingFinished.connect(self._exportArrayOffsetChanged)
-        self.form.exportArraySwapDirection.toggled.connect(self.getFields)
-        self.form.exportArrayToolChangeTime.editingFinished.connect(
-            self._exportArrayToolChangeTimeChanged
+        self._connect_export_array_signal(
+            self.form.exportArrayEnabled, "toggled", self.getFields
+        )
+        self._connect_export_array_signal(
+            self.form.exportArrayCountX, "valueChanged", self._exportArrayCountsChanged
+        )
+        self._connect_export_array_signal(
+            self.form.exportArrayCountY, "valueChanged", self._exportArrayCountsChanged
+        )
+        self._connect_export_array_signal(
+            self.form.exportArrayCountX, "editingFinished", self._exportArrayCountsChanged
+        )
+        self._connect_export_array_signal(
+            self.form.exportArrayCountY, "editingFinished", self._exportArrayCountsChanged
+        )
+        self._connect_export_array_signal(
+            self.form.exportArrayOffsetX, "editingFinished", self._exportArrayOffsetChanged
+        )
+        self._connect_export_array_signal(
+            self.form.exportArrayOffsetY, "editingFinished", self._exportArrayOffsetChanged
+        )
+        self._connect_export_array_signal(
+            self.form.exportArraySwapDirection, "toggled", self.getFields
+        )
+        self._connect_export_array_signal(
+            self.form.exportArrayToolChangeTime,
+            "editingFinished",
+            self._exportArrayToolChangeTimeChanged,
+        )
+        self._connect_export_array_signal(
+            self.form.exportArrayGrid, "maskChanged", self._exportArrayMaskChanged
         )
         self._connectExportArrayFormulaSignals()
-        self._setExportArrayFields()
+
+    def _configure_export_array_editor(self, form, loader, class_name, parent, label, tooltip):
+        widget = self._makeExportArrayEditor(loader, class_name, parent)
+        if not self._qt_widget_alive(widget):
+            return None
+        widget.setToolTip(tooltip)
+        form.addRow(label, widget)
+        return widget
+
+    def _bind_expression(self, widget, prop):
+        """Bind a Gui editor to a property. A plain Qt spin box raises Wrong type."""
+        if not self._qt_widget_alive(widget):
+            return None
+        try:
+            binding = FreeCADGui.ExpressionBinding(widget)
+            binding.bind(self.obj, prop)
+        except Exception as exc:
+            Path.Log.warning(f"Export array {prop} has no expression editor: {exc}")
+            return None
+        return binding
+
+    def _bind_quantity(self, widget, prop):
+        if not self._qt_widget_alive(widget):
+            return None
+        try:
+            class_name = widget.metaObject().className()
+        except RuntimeError:
+            return None
+        if class_name != "Gui::QuantitySpinBox":
+            return None
+        try:
+            return PathGuiUtil.QuantitySpinBox(widget, self.obj, prop)
+        except Exception as exc:
+            Path.Log.warning(f"Export array quantity editor for {prop} was not attached: {exc}")
+            return None
 
     def _bindExportArrayWidgets(self):
         """Attach expression bindings so counts and pitches accept VarSet formulas."""
-        self._exportArrayBindings = [
-            FreeCADGui.ExpressionBinding(self.form.exportArrayCountX),
-            FreeCADGui.ExpressionBinding(self.form.exportArrayCountY),
-            FreeCADGui.ExpressionBinding(self.form.exportArrayOffsetX),
-            FreeCADGui.ExpressionBinding(self.form.exportArrayOffsetY),
-        ]
-        self._exportArrayBindings[0].bind(self.obj, "ExportArrayCountX")
-        self._exportArrayBindings[1].bind(self.obj, "ExportArrayCountY")
-        self._exportArrayBindings[2].bind(self.obj, "ExportArrayOffset.x")
-        self._exportArrayBindings[3].bind(self.obj, "ExportArrayOffset.y")
-        self._exportArrayOffsetX = PathGuiUtil.QuantitySpinBox(
-            self.form.exportArrayOffsetX, self.obj, "ExportArrayOffset.x"
+        self._exportArrayBindings = []
+        for widget, prop in (
+            (getattr(self.form, "exportArrayCountX", None), "ExportArrayCountX"),
+            (getattr(self.form, "exportArrayCountY", None), "ExportArrayCountY"),
+            (getattr(self.form, "exportArrayOffsetX", None), "ExportArrayOffset.x"),
+            (getattr(self.form, "exportArrayOffsetY", None), "ExportArrayOffset.y"),
+        ):
+            binding = self._bind_expression(widget, prop)
+            if binding is not None:
+                self._exportArrayBindings.append(binding)
+        self._exportArrayOffsetX = self._bind_quantity(
+            getattr(self.form, "exportArrayOffsetX", None), "ExportArrayOffset.x"
         )
-        self._exportArrayOffsetY = PathGuiUtil.QuantitySpinBox(
-            self.form.exportArrayOffsetY, self.obj, "ExportArrayOffset.y"
+        self._exportArrayOffsetY = self._bind_quantity(
+            getattr(self.form, "exportArrayOffsetY", None), "ExportArrayOffset.y"
         )
 
     def _bindToolChangeTimeWidget(self):
         from Path.Post.ExportArray import ensure_job_properties
 
         ensure_job_properties(self.obj)
-        if not hasattr(self.form, "exportArrayToolChangeTime") or not hasattr(
-            self.obj, "ToolChangeTime"
-        ):
+        widget = getattr(self.form, "exportArrayToolChangeTime", None)
+        if not self._qt_widget_alive(widget) or not hasattr(self.obj, "ToolChangeTime"):
+            self._exportArrayToolChangeBinding = None
+            self._exportArrayToolChangeTime = None
             return
-        self._exportArrayToolChangeBinding = FreeCADGui.ExpressionBinding(
-            self.form.exportArrayToolChangeTime
-        )
-        self._exportArrayToolChangeBinding.bind(self.obj, "ToolChangeTime")
-        self._exportArrayToolChangeTime = PathGuiUtil.QuantitySpinBox(
-            self.form.exportArrayToolChangeTime, self.obj, "ToolChangeTime"
-        )
+        self._exportArrayToolChangeBinding = self._bind_expression(widget, "ToolChangeTime")
+        self._exportArrayToolChangeTime = self._bind_quantity(widget, "ToolChangeTime")
 
     def _connectExportArrayFormulaSignals(self):
-        for widget in (
-            self.form.exportArrayCountX,
-            self.form.exportArrayCountY,
-            self.form.exportArrayOffsetX,
-            self.form.exportArrayOffsetY,
-            getattr(self.form, "exportArrayToolChangeTime", None),
+        for name in (
+            "exportArrayCountX",
+            "exportArrayCountY",
+            "exportArrayOffsetX",
+            "exportArrayOffsetY",
+            "exportArrayToolChangeTime",
         ):
-            if widget is None:
-                continue
-            sig = getattr(widget, "showFormulaDialog", None)
-            if sig is None:
-                continue
-            try:
-                sig.connect(self._onExportArrayFormulaDialog)
-            except Exception:
-                pass
+            self._connect_export_array_signal(
+                getattr(self.form, name, None),
+                "showFormulaDialog",
+                self._onExportArrayFormulaDialog,
+            )
 
     def _onExportArrayFormulaDialog(self, isOpen):
         if not isOpen:
@@ -1611,17 +1821,17 @@ class TaskPanel:
         return any(name == prop for name, _expr in self.obj.ExpressionEngine)
 
     def _exportArrayToggled(self, checked):
-        widgets = [
-            self.form.exportArrayCountX,
-            self.form.exportArrayCountY,
-            self.form.exportArrayOffsetX,
-            self.form.exportArrayOffsetY,
-            self.form.exportArraySwapDirection,
-        ]
-        if hasattr(self.form, "exportArrayGrid"):
-            widgets.append(self.form.exportArrayGrid)
-        for w in widgets:
-            w.setEnabled(checked)
+        for name in (
+            "exportArrayCountX",
+            "exportArrayCountY",
+            "exportArrayOffsetX",
+            "exportArrayOffsetY",
+            "exportArraySwapDirection",
+            "exportArrayGrid",
+        ):
+            widget = getattr(self.form, name, None)
+            if self._qt_widget_alive(widget):
+                widget.setEnabled(checked)
         self._updateJobTimeEstimate()
 
     def _exportArrayCountsChanged(self):
@@ -1656,66 +1866,101 @@ class TaskPanel:
             self._exportArrayToolChangeTime.updateWidget()
         self._updateJobTimeEstimate()
 
+    def _show_quantity(self, widget, quantity):
+        if not self._qt_widget_alive(widget):
+            return
+        value = quantity.Value if hasattr(quantity, "Value") else quantity
+        try:
+            widget.setProperty("rawValue", value)
+        except RuntimeError:
+            pass
+
     def _updateJobTimeEstimate(self):
-        if not hasattr(self.form, "exportArrayJobTime") or not self.obj:
+        label = getattr(self.form, "exportArrayJobTime", None)
+        if not self._qt_widget_alive(label) or not self.obj:
             return
         from Path.Post.ExportArray import estimate_job_time, format_job_time_estimate
 
-        self.form.exportArrayJobTime.setText(
-            format_job_time_estimate(estimate_job_time(self.obj))
-        )
+        label.setText(format_job_time_estimate(estimate_job_time(self.obj)))
 
     def _rebuildExportArrayGrid(self):
-        if not hasattr(self.form, "exportArrayGrid"):
+        grid = getattr(self.form, "exportArrayGrid", None)
+        if not self._qt_widget_alive(grid) or not self.obj:
             return
-        self.form.exportArrayGrid.configure(self.obj)
+        grid.configure(self.obj)
 
     def _setExportArrayFields(self):
-        if not hasattr(self.form, "exportArrayEnabled"):
+        enabled = getattr(self.form, "exportArrayEnabled", None)
+        if not self._qt_widget_alive(enabled):
             return
         from Path.Post.ExportArray import ensure_job_properties, copies_x, copies_y, offset_vector
 
         ensure_job_properties(self.obj)
-        self.form.exportArrayEnabled.blockSignals(True)
-        self.form.exportArrayCountX.blockSignals(True)
-        self.form.exportArrayCountY.blockSignals(True)
-        self.form.exportArrayEnabled.setChecked(bool(self.obj.ExportArrayEnabled))
-        self.form.exportArrayCountX.setValue(copies_x(self.obj))
-        self.form.exportArrayCountY.setValue(copies_y(self.obj))
-        if getattr(self, "_exportArrayOffsetX", None):
-            off = offset_vector(self.obj)
-            self._exportArrayOffsetX.updateWidget(off.x)
-            self._exportArrayOffsetY.updateWidget(off.y)
-        self.form.exportArraySwapDirection.setChecked(bool(self.obj.ExportArraySwapDirection))
-        if getattr(self, "_exportArrayToolChangeTime", None):
-            self._exportArrayToolChangeTime.updateWidget()
-        self.form.exportArrayEnabled.blockSignals(False)
-        self.form.exportArrayCountX.blockSignals(False)
-        self.form.exportArrayCountY.blockSignals(False)
-        self._rebuildExportArrayGrid()
-        self._exportArrayToggled(self.form.exportArrayEnabled.isChecked())
-        self._updateJobTimeEstimate()
+        with self._export_array_signals_blocked():
+            try:
+                enabled.setChecked(bool(self.obj.ExportArrayEnabled))
+                count_x = getattr(self.form, "exportArrayCountX", None)
+                count_y = getattr(self.form, "exportArrayCountY", None)
+                if self._qt_widget_alive(count_x):
+                    count_x.setValue(copies_x(self.obj))
+                if self._qt_widget_alive(count_y):
+                    count_y.setValue(copies_y(self.obj))
+                off = offset_vector(self.obj)
+                if getattr(self, "_exportArrayOffsetX", None) and getattr(
+                    self, "_exportArrayOffsetY", None
+                ):
+                    self._exportArrayOffsetX.updateWidget(off.x)
+                    self._exportArrayOffsetY.updateWidget(off.y)
+                else:
+                    self._show_quantity(getattr(self.form, "exportArrayOffsetX", None), off.x)
+                    self._show_quantity(getattr(self.form, "exportArrayOffsetY", None), off.y)
+                swap = getattr(self.form, "exportArraySwapDirection", None)
+                if self._qt_widget_alive(swap):
+                    swap.setChecked(bool(self.obj.ExportArraySwapDirection))
+                if getattr(self, "_exportArrayToolChangeTime", None):
+                    self._exportArrayToolChangeTime.updateWidget()
+                self._rebuildExportArrayGrid()
+                self._exportArrayToggled(enabled.isChecked())
+                self._updateJobTimeEstimate()
+            except RuntimeError as exc:
+                Path.Log.debug(f"Export array fields skipped: {exc}")
 
     def _getExportArrayFields(self):
-        if not hasattr(self.form, "exportArrayEnabled"):
+        enabled = getattr(self.form, "exportArrayEnabled", None)
+        if not self._qt_widget_alive(enabled):
             return
         from Path.Post.ExportArray import ensure_job_properties
 
         ensure_job_properties(self.obj)
-        self.obj.ExportArrayEnabled = self.form.exportArrayEnabled.isChecked()
-        if not self._exportArrayHasExpression("ExportArrayCountX"):
-            self.obj.ExportArrayCountX = int(self.form.exportArrayCountX.value())
-        if not self._exportArrayHasExpression("ExportArrayCountY"):
-            self.obj.ExportArrayCountY = int(self.form.exportArrayCountY.value())
-        if getattr(self, "_exportArrayOffsetX", None):
-            if not self._exportArrayHasExpression("ExportArrayOffset.x"):
+        try:
+            self.obj.ExportArrayEnabled = enabled.isChecked()
+            count_x = getattr(self.form, "exportArrayCountX", None)
+            count_y = getattr(self.form, "exportArrayCountY", None)
+            if self._qt_widget_alive(count_x) and not self._exportArrayHasExpression(
+                "ExportArrayCountX"
+            ):
+                self.obj.ExportArrayCountX = int(count_x.value())
+            if self._qt_widget_alive(count_y) and not self._exportArrayHasExpression(
+                "ExportArrayCountY"
+            ):
+                self.obj.ExportArrayCountY = int(count_y.value())
+            if getattr(self, "_exportArrayOffsetX", None) and not self._exportArrayHasExpression(
+                "ExportArrayOffset.x"
+            ):
                 self._exportArrayOffsetX.updateProperty()
-            if not self._exportArrayHasExpression("ExportArrayOffset.y"):
+            if getattr(self, "_exportArrayOffsetY", None) and not self._exportArrayHasExpression(
+                "ExportArrayOffset.y"
+            ):
                 self._exportArrayOffsetY.updateProperty()
-        self.obj.ExportArraySwapDirection = self.form.exportArraySwapDirection.isChecked()
-        if getattr(self, "_exportArrayToolChangeTime", None):
-            if not self._exportArrayHasExpression("ToolChangeTime"):
+            swap = getattr(self.form, "exportArraySwapDirection", None)
+            if self._qt_widget_alive(swap):
+                self.obj.ExportArraySwapDirection = swap.isChecked()
+            if getattr(self, "_exportArrayToolChangeTime", None) and not self._exportArrayHasExpression(
+                "ToolChangeTime"
+            ):
                 self._exportArrayToolChangeTime.updateProperty()
+        except RuntimeError as exc:
+            Path.Log.debug(f"Export array values were not read: {exc}")
 
     def setPostProcessorOutputFile(self):
         from Path.Post.Utils import FilenameGenerator
