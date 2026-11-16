@@ -25,6 +25,7 @@
 #include <sstream>
 #include <QEvent>
 #include <QFile>
+#include <QMetaMethod>
 #include <QPointer>
 
 
@@ -725,6 +726,42 @@ TaskDialogPython::TaskDialogPython(const Py::Object& o)
     }
 }
 
+namespace
+{
+void disconnectSignalsExceptDestroyed(QObject* object)
+{
+    // Keep destroyed(): Qt's own bookkeeping listens to it. The accessibility
+    // cache is one such listener. Without it the cache keeps a stale entry for
+    // the freed address. The next widget allocated at that address (e.g. while
+    // QUiLoader builds the next CAM task panel) then gets the dead entry, and
+    // setWindowTitle() crashes in QAccessibleWidget::text() on a null widget.
+    const QMetaObject* meta = object->metaObject();
+    for (int i = 0; i < meta->methodCount(); ++i) {
+        const QMetaMethod method = meta->method(i);
+        if (method.methodType() != QMetaMethod::Signal || method.name() == "destroyed") {
+            continue;
+        }
+        QObject::disconnect(object, method, nullptr, QMetaMethod());
+    }
+}
+
+void disconnectWidgetTree(QWidget* widget)
+{
+    // PySide 6.8 SIGBUSes in onPysideReceiverSlotDestroyed if a Python slot
+    // is deallocated while its connection is still in the connection hash.
+    // An exception in the panel's accept() skips the Python disconnect and
+    // still closes the dialog, so drop the connections here first.
+    if (!widget) {
+        return;
+    }
+    const QList<QObject*> children = widget->findChildren<QObject*>();
+    for (QObject* child : children) {
+        disconnectSignalsExceptDestroyed(child);
+    }
+    disconnectSignalsExceptDestroyed(widget);
+}
+}  // namespace
+
 TaskDialogPython::~TaskDialogPython()
 {
     std::vector<QPointer<QWidget>> guarded;
@@ -732,6 +769,9 @@ TaskDialogPython::~TaskDialogPython()
     Content.clear();
 
     Base::PyGILStateLocker lock;
+    for (const QPointer<QWidget>& widget : guarded) {
+        disconnectWidgetTree(widget);
+    }
     clearForm();
 
     // Assigning None to 'dlg' may destroy some of the stored widgets.
