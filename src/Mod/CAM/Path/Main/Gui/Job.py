@@ -442,6 +442,22 @@ class MaterialDialog(QtWidgets.QDialog):
             print(e)
 
 
+def _widget_alive(widget):
+    """True when this PySide wrapper still points at a live Qt object.
+
+    Job setup can bind a QSpacerItem under a line-edit name, or a
+    QuantitySpinBox whose C++ object was already destroyed. Either one
+    raises AttributeError or RuntimeError on the next property write.
+    """
+    if widget is None:
+        return False
+    try:
+        widget.objectName()
+    except (RuntimeError, AttributeError):
+        return False
+    return True
+
+
 class StockEdit:
     Index = -1
     StockType = PathStock.StockType.Unknown
@@ -461,10 +477,15 @@ class StockEdit:
         Path.Log.track(obj.Label, select)
 
         def showHide(widget, activeWidget):
-            if widget == activeWidget:
-                widget.show()
-            else:
-                widget.hide()
+            if not _widget_alive(widget):
+                return
+            try:
+                if widget == activeWidget:
+                    widget.show()
+                else:
+                    widget.hide()
+            except (RuntimeError, AttributeError):
+                pass
 
         if select:
             self.form.stock.setCurrentIndex(self.Index)
@@ -487,9 +508,28 @@ class StockEdit:
             stock.ViewObject.Proxy.onEdit(_OpenCloseResourceEditor)
 
     def setLengthField(self, widget, prop):
-        quantity = FreeCAD.Units.Quantity(prop.Value, FreeCAD.Units.Length)
-        widget.setProperty("unit", quantity.getUserPreferred()[2])
-        widget.setProperty("rawValue", prop.Value)
+        if prop is None or not _widget_alive(widget):
+            Path.Log.error("Stock length field was not set")
+            return
+        try:
+            quantity = FreeCAD.Units.Quantity(prop.Value, FreeCAD.Units.Length)
+            widget.setProperty("unit", quantity.getUserPreferred()[2])
+            widget.setProperty("rawValue", prop.Value)
+        except (RuntimeError, AttributeError) as exc:
+            Path.Log.error(f"Stock length field was not set: {exc}")
+
+    def connectStockSignal(self, widget, signal_name, slot):
+        if not _widget_alive(widget):
+            Path.Log.error("Stock control was not connected")
+            return
+        signal = getattr(widget, signal_name, None)
+        if signal is None:
+            Path.Log.error("Stock control was not connected")
+            return
+        try:
+            signal.connect(slot)
+        except (RuntimeError, AttributeError) as exc:
+            Path.Log.error(f"Stock control was not connected: {exc}")
 
     # the following members must be overwritten by subclasses
     def editorFrame(self):
@@ -562,7 +602,8 @@ class StockFromBaseBoundBoxEdit(StockEdit):
         if self.force or not self.IsStock(obj):
             Path.Log.track()
             stock = PathStock.CreateFromBase(obj)
-            if self.force and self.editorFrame().isVisible():
+            frame = self.editorFrame()
+            if self.force and _widget_alive(frame) and frame.isVisible():
                 self.getFieldsStock(stock)
             self.setStock(obj, stock)
             self.force = False
@@ -579,58 +620,80 @@ class StockFromBaseBoundBoxEdit(StockEdit):
         self.checkXpos()
         self.checkYpos()
         self.checkZpos()
-        self.form.stockExtXneg.textChanged.connect(self.updateXpos)
-        self.form.stockExtYneg.textChanged.connect(self.updateYpos)
-        self.form.stockExtZneg.textChanged.connect(self.updateZpos)
-        self.form.stockExtXpos.textChanged.connect(self.checkXpos)
-        self.form.stockExtYpos.textChanged.connect(self.checkYpos)
-        self.form.stockExtZpos.textChanged.connect(self.checkZpos)
-        if hasattr(self.form, "linkStockAndModel"):
-            self.form.linkStockAndModel.setChecked(False)
+        self.connectStockSignal(self.form.stockExtXneg, "textChanged", self.updateXpos)
+        self.connectStockSignal(self.form.stockExtYneg, "textChanged", self.updateYpos)
+        self.connectStockSignal(self.form.stockExtZneg, "textChanged", self.updateZpos)
+        self.connectStockSignal(self.form.stockExtXpos, "textChanged", self.checkXpos)
+        self.connectStockSignal(self.form.stockExtYpos, "textChanged", self.checkYpos)
+        self.connectStockSignal(self.form.stockExtZpos, "textChanged", self.checkZpos)
+        link = getattr(self.form, "linkStockAndModel", None)
+        if _widget_alive(link):
+            try:
+                link.setChecked(False)
+            except (RuntimeError, AttributeError):
+                pass
 
     def checkXpos(self):
-        self.trackXpos = self.form.stockExtXneg.property(
-            "rawValue"
-        ) == self.form.stockExtXpos.property("rawValue")
-        self.getFields(self.obj, ["xpos"])
+        try:
+            self.trackXpos = self.form.stockExtXneg.property(
+                "rawValue"
+            ) == self.form.stockExtXpos.property("rawValue")
+            self.getFields(self.obj, ["xpos"])
+        except (RuntimeError, AttributeError):
+            self.trackXpos = False
 
     def checkYpos(self):
-        self.trackYpos = self.form.stockExtYneg.property(
-            "rawValue"
-        ) == self.form.stockExtYpos.property("rawValue")
-        self.getFields(self.obj, ["ypos"])
+        try:
+            self.trackYpos = self.form.stockExtYneg.property(
+                "rawValue"
+            ) == self.form.stockExtYpos.property("rawValue")
+            self.getFields(self.obj, ["ypos"])
+        except (RuntimeError, AttributeError):
+            self.trackYpos = False
 
     def checkZpos(self):
-        self.trackZpos = self.form.stockExtZneg.property(
-            "rawValue"
-        ) == self.form.stockExtZpos.property("rawValue")
-        self.getFields(self.obj, ["zpos"])
+        try:
+            self.trackZpos = self.form.stockExtZneg.property(
+                "rawValue"
+            ) == self.form.stockExtZpos.property("rawValue")
+            self.getFields(self.obj, ["zpos"])
+        except (RuntimeError, AttributeError):
+            self.trackZpos = False
 
     def updateXpos(self):
         fields = ["xneg"]
-        if self.trackXpos:
-            self.form.stockExtXpos.setProperty(
-                "rawValue", self.form.stockExtXneg.property("rawValue")
-            )
-            fields.append("xpos")
+        if self.trackXpos and _widget_alive(self.form.stockExtXpos):
+            try:
+                self.form.stockExtXpos.setProperty(
+                    "rawValue", self.form.stockExtXneg.property("rawValue")
+                )
+                fields.append("xpos")
+            except (RuntimeError, AttributeError):
+                pass
         self.getFields(self.obj, fields)
 
     def updateYpos(self):
         fields = ["yneg"]
-        if self.trackYpos:
-            self.form.stockExtYpos.setProperty(
-                "rawValue", self.form.stockExtYneg.property("rawValue")
-            )
-            fields.append("ypos")
+        if self.trackYpos and _widget_alive(self.form.stockExtYpos):
+            try:
+                self.form.stockExtYpos.setProperty(
+                    "rawValue", self.form.stockExtYneg.property("rawValue")
+                )
+                fields.append("ypos")
+            except (RuntimeError, AttributeError):
+                pass
         self.getFields(self.obj, fields)
 
     def updateZpos(self):
         fields = ["zneg"]
-        if self.trackZpos:
-            self.form.stockExtZpos.setProperty(
-                "rawValue", self.form.stockExtZneg.property("rawValue")
-            )
-            fields.append("zpos")
+        if self.trackZpos and _widget_alive(self.form.stockExtZpos):
+            try:
+                self.form.stockExtZpos.setProperty(
+                    "rawValue", self.form.stockExtZneg.property("rawValue")
+                )
+                fields.append("zpos")
+            except (RuntimeError, AttributeError):
+                pass
         self.getFields(self.obj, fields)
 
 
@@ -673,9 +736,15 @@ class StockCreateBoxEdit(StockEdit):
 
     def setupUi(self, obj):
         self.setFields(obj)
-        self.form.stockBoxLength.textChanged.connect(lambda: self.getFields(obj, ["length"]))
-        self.form.stockBoxWidth.textChanged.connect(lambda: self.getFields(obj, ["width"]))
-        self.form.stockBoxHeight.textChanged.connect(lambda: self.getFields(obj, ["height"]))
+        self.connectStockSignal(
+            self.form.stockBoxLength, "textChanged", lambda: self.getFields(obj, ["length"])
+        )
+        self.connectStockSignal(
+            self.form.stockBoxWidth, "textChanged", lambda: self.getFields(obj, ["width"])
+        )
+        self.connectStockSignal(
+            self.form.stockBoxHeight, "textChanged", lambda: self.getFields(obj, ["height"])
+        )
 
 
 class StockCreateCylinderEdit(StockEdit):
@@ -721,11 +790,17 @@ class StockCreateCylinderEdit(StockEdit):
         else:
             self.axis = "Z"
         self.setFields(obj)
-        self.form.stockCylinderRadius.textChanged.connect(lambda: self.getFields(obj, ["radius"]))
-        self.form.stockCylinderHeight.textChanged.connect(lambda: self.getFields(obj, ["height"]))
+        self.connectStockSignal(
+            self.form.stockCylinderRadius, "textChanged", lambda: self.getFields(obj, ["radius"])
+        )
+        self.connectStockSignal(
+            self.form.stockCylinderHeight, "textChanged", lambda: self.getFields(obj, ["height"])
+        )
         if hasattr(self.form, "stockCylinderAxis"):
-            self.form.stockCylinderAxis.currentIndexChanged.connect(
-                lambda: self.getFields(obj, ["axis"])
+            self.connectStockSignal(
+                self.form.stockCylinderAxis,
+                "currentIndexChanged",
+                lambda: self.getFields(obj, ["axis"]),
             )
 
     def populateCombobox(self, widget, enumTups):
@@ -777,14 +852,19 @@ class StockFromExistingEdit(StockEdit):
             solids.remove(job.Stock)
         excludeIndexes = []
         for index, model in enumerate(solids):
+            # Tool solids are owned by a tool bit that may not be InList[0].
+            # A missing view provider is not something the user can pick.
+            view = getattr(model, "ViewObject", None)
+            hidden = not getattr(view, "ShowInTree", False)
+            tool_owned = any(hasattr(owner, "ToolBitID") for owner in model.InListRecursive)
             if (
                 any("Tools" in ob.Name for ob in model.InListRecursive)
                 or hasattr(model, "PathResource")
-                or (model.InList and hasattr(model.InList[0], "ToolBitID"))
+                or tool_owned
                 or hasattr(model, "ToolBitID")
                 or model.TypeId == "App::DocumentObjectGroup"
                 or hasattr(model, "StockType")
-                or not model.ViewObject.ShowInTree
+                or hidden
                 or model.isDerivedFrom("PartDesign::Feature")
             ):
                 excludeIndexes.append(index)
@@ -800,34 +880,52 @@ class StockFromExistingEdit(StockEdit):
         # dropdown list. This is important because the `currentIndexChanged` signal
         # will in the end result in the stock object being recreated in `getFields`
         # method, discarding any changes made (like position in respect to origin).
-        self.form.stockExisting.blockSignals(True)
-        self.form.stockExisting.clear()
+        combo = self.form.stockExisting
+        if not _widget_alive(combo):
+            Path.Log.error("Stock solid list was not filled")
+            return
+        try:
+            combo.blockSignals(True)
+        except (RuntimeError, AttributeError) as exc:
+            Path.Log.error(f"Stock solid list was not filled: {exc}")
+            return
+        combo.clear()
 
         stockBaseName = obj.Stock.Objects[0].Name if getattr(obj.Stock, "Objects", None) else None
         index = 0
-        for i, solid in enumerate(self.candidates(obj)):
-            self.form.stockExisting.addItem(solid.Label, solid)
-            if stockBaseName == solid.Name:
-                index = i
+        try:
+            for i, solid in enumerate(self.candidates(obj)):
+                combo.addItem(solid.Label, solid)
+                if stockBaseName == solid.Name:
+                    index = i
 
-        if self.force and self.IsStock(obj) and obj.Model.Group:  # set placement while refresh
-            for model in obj.Model.Group:
-                objects = getattr(model, "Objects", None)
-                if objects and objects[0] == obj.Stock.Objects[0]:
-                    obj.Stock.Placement = model.Placement
-                    break
-            else:
-                obj.Stock.Placement = obj.Model.Group[0].Placement
+            if self.force and self.IsStock(obj) and obj.Model.Group:  # set placement while refresh
+                for model in obj.Model.Group:
+                    objects = getattr(model, "Objects", None)
+                    if objects and objects[0] == obj.Stock.Objects[0]:
+                        obj.Stock.Placement = model.Placement
+                        break
+                else:
+                    obj.Stock.Placement = obj.Model.Group[0].Placement
 
-        self.form.stockExisting.setCurrentIndex(index)
-        self.form.stockExisting.blockSignals(False)
+            combo.setCurrentIndex(index)
+        except (RuntimeError, AttributeError) as exc:
+            Path.Log.error(f"Stock solid list was not filled: {exc}")
+            return
+        finally:
+            try:
+                combo.blockSignals(False)
+            except (RuntimeError, AttributeError):
+                pass
 
         if not self.IsStock(obj):
             self.getFields(obj)
 
     def setupUi(self, obj):
         self.setFields(obj)
-        self.form.stockExisting.currentIndexChanged.connect(lambda: self.getFields(obj))
+        self.connectStockSignal(
+            self.form.stockExisting, "currentIndexChanged", lambda: self.getFields(obj)
+        )
 
 
 class TaskPanel:
@@ -973,13 +1071,44 @@ class TaskPanel:
         self._jobIntegrityCheck()  # Check existence of Model and Tools
         self.preCleanup()
         self.getFields()
-        self.setupGlobal.accept()
-        self.setupOps.accept()
+        try:
+            self.setupGlobal.accept()
+        except Exception as exc:
+            Path.Log.error(f"Job setup sheet was not saved: {exc}")
+        try:
+            self.setupOps.accept()
+        except Exception as exc:
+            Path.Log.error(f"Operation defaults were not saved: {exc}")
         FreeCAD.ActiveDocument.commitTransaction()
         self.cleanup(resetEdit)
 
+    def _editingThisJob(self):
+        try:
+            gui_doc = FreeCADGui.ActiveDocument
+            if gui_doc is None:
+                return False
+            editing = gui_doc.getInEdit()
+        except Exception:
+            return False
+        if editing is None:
+            return False
+        return getattr(editing, "Object", None) is self.obj
+
     def reject(self, resetEdit=True):
         Path.Log.track()
+        # Drop the 3D-view callback while this job's view provider is still
+        # alive. removeObject() below destroys it, and a mouse move after that
+        # calls ViewProvider::eventCallback on the freed pointer. Null the
+        # task panel first: resetEdit() re-enters unsetEdit -> reject.
+        edit_released = False
+        if self.deleteOnReject and self._editingThisJob():
+            try:
+                if self.vproxy is not None:
+                    self.vproxy.taskPanel = None
+                FreeCADGui.ActiveDocument.resetEdit()
+                edit_released = True
+            except Exception as exc:
+                Path.Log.error(f"Job edit was not released before cancel: {exc}")
         self.preCleanup()
         self.setupGlobal.reject()
         self.setupOps.reject()
@@ -996,7 +1125,7 @@ class TaskPanel:
                 self.deleteOnReject,
                 FreeCAD.ActiveDocument.getObject(self.name),
             )
-        self.cleanup(resetEdit)
+        self.cleanup(resetEdit and not edit_released)
         return True
 
     def _releaseComboAccessibility(self):
@@ -2390,6 +2519,12 @@ class TaskPanel:
         return (selObject, p)
 
     def updateStockEditor(self, index, force=False):
+        try:
+            self._updateStockEditor(index, force)
+        except Exception as exc:
+            Path.Log.error(f"Stock editor was not opened: {exc}")
+
+    def _updateStockEditor(self, index, force=False):
         def setupFromBaseEdit():
             Path.Log.track(index, force)
             if force or not self.stockFromBase:
@@ -2570,18 +2705,83 @@ class TaskPanel:
             self.setupOps.accept()
             self.obj.Document.recompute()
 
+    # Names the stock page and the setup sheet write on open. A mis-bound
+    # attribute (a spacer stored as a line edit, or a destroyed spin box)
+    # used to abort setupUi before the stock-type menu was connected.
+    _FORM_WIDGET_NAMES = (
+        "setupStartDepthExpr",
+        "setupFinalDepthExpr",
+        "setupStepDownExpr",
+        "setupClearanceHeightExpr",
+        "setupSafeHeightExpr",
+        "setupClearanceHeightOffs",
+        "setupSafeHeightOffs",
+        "setupRapidHorizontal",
+        "setupRapidVertical",
+        "stockExtXneg",
+        "stockExtXpos",
+        "stockExtYneg",
+        "stockExtYpos",
+        "stockExtZneg",
+        "stockExtZpos",
+        "stockBoxLength",
+        "stockBoxWidth",
+        "stockBoxHeight",
+        "stockCylinderRadius",
+        "stockCylinderHeight",
+        "stockCylinderAxis",
+        "stockExisting",
+        "stock",
+    )
+
+    def _repairFormWidgets(self):
+        form = self.form
+        for name in self._FORM_WIDGET_NAMES:
+            current = getattr(form, name, None)
+            try:
+                if (
+                    isinstance(current, QtGui.QWidget)
+                    and _widget_alive(current)
+                    and current.objectName() == name
+                ):
+                    continue
+            except (RuntimeError, AttributeError):
+                pass
+            found = None
+            try:
+                found = form.findChild(QtGui.QWidget, name)
+            except (RuntimeError, AttributeError):
+                found = None
+            if found is None:
+                Path.Log.error(f"Job panel widget {name} is missing")
+                continue
+            setattr(form, name, found)
+
     def setupUi(self, activate):
         try:
             self._setupExportArrayUi()
         except Exception as exc:
             Path.Log.error(f"Export array panel was not added: {exc}")
-        self.setupGlobal.setupUi()
+        try:
+            self._repairFormWidgets()
+        except Exception as exc:
+            Path.Log.error(f"Job panel widgets were not repaired: {exc}")
+        try:
+            self.setupGlobal.setupUi()
+        except Exception as exc:
+            Path.Log.error(f"Job setup sheet was not filled: {exc}")
         try:
             self.setupOps.setupUi()
         except Exception as ee:
             Path.Log.error(str(ee))
-        self.updateStockEditor(-1, False)
-        self.setFields()
+        try:
+            self.updateStockEditor(-1, False)
+        except Exception as exc:
+            Path.Log.error(f"Stock editor was not opened: {exc}")
+        try:
+            self.setFields()
+        except Exception as exc:
+            Path.Log.error(f"Job fields were not filled: {exc}")
         FreeCADGui.Selection.clearSelection()
 
         # Info
@@ -2628,8 +2828,11 @@ class TaskPanel:
         self.form.centerInStock.clicked.connect(self.alignCenterInStock)
         self.form.centerInStockXY.clicked.connect(self.alignCenterInStockXY)
 
-        self.form.stock.currentIndexChanged.connect(self.updateStockEditor)
-        self.form.refreshStock.clicked.connect(self.refreshStock)
+        try:
+            self.form.stock.currentIndexChanged.connect(self.updateStockEditor)
+            self.form.refreshStock.clicked.connect(self.refreshStock)
+        except (RuntimeError, AttributeError) as exc:
+            Path.Log.error(f"Stock controls were not connected: {exc}")
 
         self.form.modelSetXAxis.clicked.connect(lambda: self.modelSetAxis(FreeCAD.Vector(1, 0, 0)))
         self.form.modelSetYAxis.clicked.connect(lambda: self.modelSetAxis(FreeCAD.Vector(0, 1, 0)))
@@ -2817,6 +3020,31 @@ def Create(base, template=None, openTaskPanel=True):
     except Exception as exc:
         Path.Log.error(exc)
         traceback.print_exc()
+        # setupUi can fail after the panel is shown. Close it without reject:
+        # reject would delete the job while a 3D-view callback may still name
+        # its view provider. Leave the committed job in the document.
+        job = locals().get("obj")
+        proxy = None
+        try:
+            proxy = getattr(getattr(job, "ViewObject", None), "Proxy", None)
+        except Exception:
+            proxy = None
+        # Only the job panel we just opened. A failure earlier in Create must
+        # not close a task dialog the user already had open.
+        if proxy is not None and getattr(proxy, "taskPanel", None) is not None:
+            try:
+                proxy.taskPanel = None
+                proxy.deleteOnReject = False
+                FreeCADGui.Control.closeDialog()
+            except Exception:
+                pass
+            try:
+                gui_doc = FreeCADGui.ActiveDocument
+                editing = gui_doc.getInEdit() if gui_doc is not None else None
+                if job is not None and getattr(editing, "Object", None) is job:
+                    gui_doc.resetEdit()
+            except Exception:
+                pass
         FreeCAD.ActiveDocument.abortTransaction()
 
 

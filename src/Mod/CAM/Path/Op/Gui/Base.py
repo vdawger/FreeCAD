@@ -1913,6 +1913,25 @@ class _AdaptiveTabBar(QtGui.QTabBar):
         return size
 
 
+def _living_parents(widget):
+    """Yield ancestors. Stop when Qt has already destroyed one.
+
+    Closing a task panel deletes parents while this widget still has queued
+    resize and currentChanged callbacks. parentWidget() then raises
+    RuntimeError ('Internal C++ object already deleted').
+    """
+    try:
+        parent = widget.parentWidget()
+    except RuntimeError:
+        return
+    while parent is not None:
+        yield parent
+        try:
+            parent = parent.parentWidget()
+        except RuntimeError:
+            return
+
+
 class IconTabWidget(QtGui.QTabWidget):
     """Tab widget that shows every tab's icon + label when there's room; if the
     full set doesn't fit the available width, it falls back to icon-only tabs
@@ -1974,15 +1993,19 @@ class IconTabWidget(QtGui.QTabWidget):
         return current.heightForWidth(width) + self.tabBar().sizeHint().height()
 
     def _resizeToCurrentPage(self, _index):
-        self.updateGeometry()
-        target = self.sizeHint()
-        parent = self.parentWidget()
-        while parent is not None:
-            if isinstance(parent, QtGui.QScrollArea):
-                target = target.expandedTo(parent.viewport().size())
-                break
-            parent = parent.parentWidget()
-        self.resize(target)
+        try:
+            self.updateGeometry()
+            target = self.sizeHint()
+            for parent in _living_parents(self):
+                try:
+                    if isinstance(parent, QtGui.QScrollArea):
+                        target = target.expandedTo(parent.viewport().size())
+                        break
+                except RuntimeError:
+                    break
+            self.resize(target)
+        except RuntimeError:
+            pass
 
     def addTab(self, widget, icon, label):
         if self.tabPosition() == QtGui.QTabWidget.West and not icon.isNull():
@@ -2011,11 +2034,12 @@ class IconTabWidget(QtGui.QTabWidget):
 
     def _installAncestorFilters(self):
         self._removeAncestorFilters()
-        parent = self.parentWidget()
-        while parent is not None:
-            parent.installEventFilter(self)
-            self._filteredAncestors.append(parent)
-            parent = parent.parentWidget()
+        for parent in _living_parents(self):
+            try:
+                parent.installEventFilter(self)
+                self._filteredAncestors.append(parent)
+            except RuntimeError:
+                break
 
     def _removeAncestorFilters(self):
         for ancestor in self._filteredAncestors:
@@ -2049,12 +2073,16 @@ class IconTabWidget(QtGui.QTabWidget):
         otherwise this widget's own width. Confirmed load-bearing: removing
         this in testing made tabs stop reflowing on resize entirely, so
         self.width() alone does not track the real available width here."""
-        parent = self.parentWidget()
-        while parent is not None:
-            if isinstance(parent, QtGui.QScrollArea):
-                return parent.viewport().width()
-            parent = parent.parentWidget()
-        return self.width()
+        try:
+            for parent in _living_parents(self):
+                try:
+                    if isinstance(parent, QtGui.QScrollArea):
+                        return parent.viewport().width()
+                except RuntimeError:
+                    break
+            return self.width()
+        except RuntimeError:
+            return 0
 
     def _updateTabLabels(self, current):
         """Show every tab's label if they all fit; otherwise only the active tab."""
@@ -2069,6 +2097,8 @@ class IconTabWidget(QtGui.QTabWidget):
                 for index, label in self._tabLabels.items():
                     if index != current:
                         tabbar.setTabText(index, "")
+        except RuntimeError:
+            pass
         finally:
             self._updatingLabels = False
 

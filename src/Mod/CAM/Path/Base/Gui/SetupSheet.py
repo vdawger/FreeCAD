@@ -152,6 +152,22 @@ class OpTaskPanel:
     def setupUi(self):
         Path.Log.track()
 
+        table = getattr(self.form, "table", None)
+        try:
+            table_ok = isinstance(table, QtGui.QAbstractItemView)
+        except Exception:
+            table_ok = False
+        if not table_ok:
+            found = None
+            try:
+                found = self.form.findChild(QtGui.QAbstractItemView, "table")
+            except Exception:
+                found = None
+            if found is None:
+                Path.Log.error(f"Operation default table for {self.name} was not created")
+                return
+            self.form.table = found
+
         self.delegate = Delegate(self.form)
         self.model = QtGui.QStandardItemModel(len(self.props), 3, self.form)
         self.model.setHorizontalHeaderLabels(["Set", "Property", "Value"])
@@ -180,12 +196,15 @@ class OpTaskPanel:
                 self.model.item(i, 1).setEnabled(False)
                 self.model.item(i, 2).setEnabled(False)
 
-        self.form.table.setModel(self.model)
-        self.form.table.setItemDelegateForColumn(2, self.delegate)
-        self.form.table.resizeColumnsToContents()
-        self.form.table.setMinimumHeight(300)
-
-        self.model.dataChanged.connect(self.updateData)
+        try:
+            self.form.table.setModel(self.model)
+            self.form.table.setItemDelegateForColumn(2, self.delegate)
+            self.form.table.resizeColumnsToContents()
+            self.form.table.setMinimumHeight(300)
+            self.model.dataChanged.connect(self.updateData)
+        except Exception as exc:
+            Path.Log.error(f"Operation default table for {self.name} was not filled: {exc}")
+            self.model = None
 
     def propertyName(self, prop):
         return PathSetupSheet.OpPropertyName(self.name, prop)
@@ -194,6 +213,8 @@ class OpTaskPanel:
         return PathSetupSheet.OpPropertyGroup(self.name)
 
     def accept(self):
+        if self.model is None:
+            return False
         propertiesCreatedRemoved = False
         for i, name in enumerate(self.props):
             prop = self.prototype.getProperty(name)
@@ -235,7 +256,14 @@ class OpsDefaultEditor:
         pass
 
     def accept(self):
-        if any([op.accept() for op in self.ops]):
+        changed = False
+        for op in self.ops:
+            try:
+                if op.accept():
+                    changed = True
+            except Exception as exc:
+                Path.Log.error(f"Operation defaults for {op.name} were not saved: {exc}")
+        if changed:
             Path.Log.track()
 
     def getFields(self):
@@ -264,7 +292,10 @@ class OpsDefaultEditor:
 
     def setupUi(self):
         for op in self.ops:
-            op.setupUi()
+            try:
+                op.setupUi()
+            except Exception as exc:
+                Path.Log.error(f"Operation defaults for {op.name} were not shown: {exc}")
         self.updateUI()
         if self.form:
             self.form.opDefaultOp.currentIndexChanged.connect(self.updateUI)
