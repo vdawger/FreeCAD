@@ -37,7 +37,9 @@
 #include <Inventor/nodes/SoSwitch.h>
 #include <Inventor/nodes/SoTransform.h>
 
+#include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <Base/BoundBox.h>
 #include <Base/Console.h>
@@ -69,6 +71,42 @@ FC_LOG_LEVEL_INIT("ViewProvider", true, true)
 
 using namespace std;
 using namespace Gui;
+
+namespace
+{
+std::mutex& viewProviderLiveMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_set<const Gui::ViewProvider*>& viewProviderLiveSet()
+{
+    static std::unordered_set<const Gui::ViewProvider*> live;
+    return live;
+}
+
+void registerLiveViewProvider(const Gui::ViewProvider* provider)
+{
+    std::lock_guard<std::mutex> lock(viewProviderLiveMutex());
+    viewProviderLiveSet().insert(provider);
+}
+
+void unregisterLiveViewProvider(const Gui::ViewProvider* provider)
+{
+    std::lock_guard<std::mutex> lock(viewProviderLiveMutex());
+    viewProviderLiveSet().erase(provider);
+}
+
+bool isLiveViewProvider(const Gui::ViewProvider* provider)
+{
+    if (!provider) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(viewProviderLiveMutex());
+    return viewProviderLiveSet().find(provider) != viewProviderLiveSet().end();
+}
+}  // namespace
 
 
 namespace Gui
@@ -128,10 +166,15 @@ ViewProvider::ViewProvider()
     pcModeSwitch->whichChild = _iActualMode;
 
     setRenderCacheMode(ViewParams::instance()->getRenderCache());
+    registerLiveViewProvider(this);
 }
 
 ViewProvider::~ViewProvider()
 {
+    // Drop this address before members are torn down. The 3D viewer can still
+    // deliver a mouse move to eventCallback after the edit object is deleted;
+    // that callback must not dereference a freed view provider.
+    unregisterLiveViewProvider(this);
     if (pyViewObject) {
         Base::PyGILStateLocker lock;
         pyViewObject->setInvalid();
@@ -219,10 +262,17 @@ void highlight(const HighlightMode& high)
 
 void ViewProvider::eventCallback(void* ud, SoEventCallback* node)
 {
+    // userdata is the edit view provider. Do not touch it until the live set
+    // says the constructor finished and the destructor has not started.
+    if (!node || !isLiveViewProvider(static_cast<ViewProvider*>(ud))) {
+        return;
+    }
     const SoEvent* ev = node->getEvent();
+    if (!ev) {
+        return;
+    }
     auto viewer = static_cast<Gui::View3DInventorViewer*>(node->getUserData());
     auto self = static_cast<ViewProvider*>(ud);
-    assert(self);
 
     try {
         // Keyboard events
