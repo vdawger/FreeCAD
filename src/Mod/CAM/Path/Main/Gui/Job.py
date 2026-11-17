@@ -2106,17 +2106,10 @@ class TaskPanel:
             translate("CAM_Job", "All Files (*)"),
         )
         if filename and filename[0]:
-            msgBox = QtGui.QMessageBox()
-            msgBox.setWindowTitle("Warning")
-            msgBox.setText("<p align='center'>This will replace filename template</p>")
-            msgBox.setInformativeText("<p align='center'>Are you sure?</p>")
-            msgBox.findChild(QtGui.QGridLayout).setColumnMinimumWidth(1, 250)
-            btn1 = msgBox.addButton("Ok", QtGui.QMessageBox.ButtonRole.YesRole)
-            _ = msgBox.addButton("Cancel", QtGui.QMessageBox.ButtonRole.RejectRole)
-            msgBox.exec()
-            if msgBox.clickedButton() == btn1:
-                self.obj.PostProcessorOutputFile = str(filename[0])
-                self.setFields()
+            # Picking a file in the save dialog is the confirmation; the field
+            # still shows the path, so the template can be typed back later.
+            self.obj.PostProcessorOutputFile = str(filename[0])
+            self.setFields()
 
     def operationSelect(self):
         tree = self.form.operationsList
@@ -2954,38 +2947,21 @@ class TaskPanel:
         FreeCADGui.Selection.addObserver(self)
 
     def _jobIntegrityCheck(self):
-        """_jobIntegrityCheck() ... Check Job object for existence of Model and Tools
-        If either Model or Tools is empty, change GUI tab, issue appropriate warning,
-        and offer chance to add appropriate item."""
-
-        def _displayWarningWindow(msg):
-            """Display window with warning message and Add action button.
-            Return action state."""
-            txtHeader = translate("CAM_Job", "Warning")
-            txtPleaseAddOne = translate("CAM_Job", "Add one.")
-            txtOk = translate("CAM_Job", "Ok")
-            txtAdd = translate("CAM_Job", "Add")
-
-            msgbox = QtGui.QMessageBox(
-                QtGui.QMessageBox.Warning, txtHeader, msg + " " + txtPleaseAddOne
-            )
-            msgbox.addButton(txtOk, QtGui.QMessageBox.AcceptRole)  # Add 'Ok' button
-            msgbox.addButton(txtAdd, QtGui.QMessageBox.ActionRole)  # Add 'Add' button
-            return msgbox.exec_()
-
-        # Check if at least on base model is present
+        """_jobIntegrityCheck() ... Warn when the job has no model or no tool.
+        Reported in the Report view instead of a modal box: the job is saved
+        either way, and the Model and Tools tabs add the missing item later."""
         if len(self.obj.Model.Group) == 0:
-            self.form.setCurrentIndex(1)  # Change tab to General tab
-            no_model_txt = translate("CAM_Job", "This job has no base model.")
-            if _displayWarningWindow(no_model_txt) == 1:
-                self.jobModelEdit()
-
-        # Check if at least one tool is present
+            Path.Log.warning(
+                translate("CAM_Job", "{} has no base model. Add one in the job's Model tab.").format(
+                    self.obj.Label
+                )
+            )
         if len(self.obj.Tools.Group) == 0:
-            self.form.setCurrentIndex(3)  # Change tab to Tools tab
-            no_tool_txt = translate("CAM_Job", "This job has no tool.")
-            if _displayWarningWindow(no_tool_txt) == 1:
-                self.toolControllerAdd()
+            Path.Log.warning(
+                translate("CAM_Job", "{} has no tool. Add one in the job's Tools tab.").format(
+                    self.obj.Label
+                )
+            )
 
     # SelectionObserver interface
     def addSelection(self, doc, obj, sub, pnt):

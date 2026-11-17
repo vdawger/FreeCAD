@@ -62,7 +62,48 @@ class CommandJobCreate:
     def IsActive(self):
         return FreeCAD.ActiveDocument is not None
 
+    @classmethod
+    def _modelsWithoutDialog(cls):
+        """Models to use without asking: the selected base objects, or the only
+        candidate when nothing is selected. None when the dialog is needed:
+        nothing usable, or a selection that includes job resources (model or
+        stock clones) or objects that cannot be a job model."""
+
+        def usable(o):
+            return (
+                PathJob.ObjectJob.isBaseCandidate(o)
+                and not hasattr(o, "StockType")
+                and not hasattr(o, "PathResource")
+                and o.TypeId != "App::DocumentObjectGroup"
+                and getattr(o.ViewObject, "ShowInTree", True)
+            )
+
+        selected = FreeCADGui.Selection.getSelection()
+        if selected:
+            return selected if all(usable(o) for o in selected) else None
+        candidates = [o for o in PathJob.ObjectJob.baseCandidates() if usable(o)]
+        return candidates if len(candidates) == 1 else None
+
+    @classmethod
+    def _defaultTemplate(cls):
+        template = Path.Preferences.defaultJobTemplate()
+        return template if template and os.path.isfile(template) else None
+
     def Activated(self):
+        # When the models are clear from the selection, create the job straight
+        # away with the default template (the dialog's own preselection). The
+        # job panel's model Edit button changes the models afterwards.
+        models = self._modelsWithoutDialog()
+        if models:
+            self.Execute(models, self._defaultTemplate())
+            FreeCAD.ActiveDocument.recompute()
+            FreeCAD.Console.PrintMessage(
+                translate("CAM_Job", "New job uses {}. Change models with Edit in the job's Model tab.").format(
+                    ", ".join(o.Label for o in models)
+                )
+                + "\n"
+            )
+            return
         dialog = PathJobDlg.JobCreate()
         dialog.setupTemplate()
         dialog.setupModel()

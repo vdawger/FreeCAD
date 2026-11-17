@@ -1806,10 +1806,16 @@ def Create(res):
             obj.ViewObject.Document.setEdit(obj.ViewObject, 0)
             return obj
     except PathUtils.PathNoTCExistsException:
-        msg = translate("PathOp", "No suitable tool controller found.\nAborting op creation")
-        diag = QtGui.QMessageBox(QtGui.QMessageBox.Warning, "Error", msg)
-        diag.setWindowModality(QtCore.Qt.ApplicationModal)
-        diag.exec_()
+        # Report it instead of a modal box; there is nothing to answer.
+        msg = translate(
+            "PathOp",
+            "No suitable tool controller in {}. Add one in the job's Tools tab, then create the operation again.",
+        ).format(res.job.Label)
+        Path.Log.error(msg)
+        try:
+            FreeCADGui.getMainWindow().statusBar().showMessage(msg, 15000)
+        except Exception:
+            pass
     except PathOp.PathNoTCException:
         Path.Log.warning(translate("PathOp", "No tool controller, aborting op creation"))
 
