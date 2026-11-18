@@ -40,9 +40,11 @@ ToolController - not a new mechanism, just applied to "the same tool's
 current library version" instead of "a different tool".
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+import FreeCAD
 import Path
 from .FeedsSpeeds.presets import get_presets
 from .toolbit.models.base import PropertyGroupShape
@@ -98,6 +100,44 @@ def geometry_properties(obj) -> List[str]:
     return [p for p in obj.PropertiesList if obj.getGroupOfProperty(p) == PropertyGroupShape]
 
 
+def _as_quantity(value) -> Optional[FreeCAD.Units.Quantity]:
+    """``value`` as a Quantity, or None when it isn't a number.
+
+    A bare number (or a numeric string such as "3.17") stays unitless.
+    """
+    if isinstance(value, FreeCAD.Units.Quantity):
+        return value
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, str)):
+        try:
+            return FreeCAD.Units.Quantity(value)
+        except Exception:  # not a number or quantity expression
+            return None
+    return None
+
+
+def _same_value(old_value, new_value) -> bool:
+    """Whether a library value matches the embedded one.
+
+    A library tool that has not been attached to a document keeps a value
+    stored without a unit (``"ShankDiameter": "3.17"``, common in imported
+    tool files) as a bare number. Attaching it reads that number in the
+    property's own unit, so the embedded copy holds ``3.17 mm``. A unitless
+    side therefore matches on value alone, compared in FreeCAD's internal
+    units. Two values that both have units must also agree on the unit.
+    """
+    if old_value == new_value:
+        return True
+    old_q, new_q = _as_quantity(old_value), _as_quantity(new_value)
+    if old_q is None or new_q is None:
+        return False
+    unitless = FreeCAD.Units.Unit()
+    if old_q.Unit != new_q.Unit and unitless not in (old_q.Unit, new_q.Unit):
+        return False
+    return math.isclose(old_q.Value, new_q.Value, rel_tol=1e-9, abs_tol=1e-9)
+
+
 @dataclass
 class GeometryChange:
     name: str
@@ -141,7 +181,7 @@ def diff_tool_geometry(embedded_obj, library_obj) -> List[GeometryChange]:
     for name in sorted(common):
         old_value = getattr(embedded_obj, name)
         new_value = getattr(library_obj, name)
-        if new_value is not None and old_value != new_value:
+        if new_value is not None and not _same_value(old_value, new_value):
             changes.append(
                 GeometryChange(
                     name=name,

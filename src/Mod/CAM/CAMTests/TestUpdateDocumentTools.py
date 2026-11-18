@@ -106,6 +106,35 @@ class TestDiffToolGeometry(PathTestWithAssets):
 
         self.assertEqual(changes, {"CuttingEdgeHeight", "Length"})
 
+    def test_unitless_library_value_matches_embedded_quantity(self):
+        # Imported tool files often store dimensions without a unit
+        # ("ShankDiameter": "3.17"). The embedded copy reads that as mm, so
+        # 5 mm against a bare 5 is the same tool, not an update.
+        embedded = cast(ToolBitEndmill, self.assets.get("toolbit://5mm_Endmill"))
+        library = cast(ToolBitEndmill, self.assets.get("toolbit://5mm_Endmill"))
+        embedded.obj.Diameter = FreeCAD.Units.Quantity("5 mm")
+        for unitless in (5.0, 5, "5", "5.000"):
+            library.obj.Diameter = unitless
+            self.assertEqual(diff_tool_geometry(embedded.obj, library.obj), [], unitless)
+
+    def test_unitless_library_value_that_differs_is_a_change(self):
+        embedded = cast(ToolBitEndmill, self.assets.get("toolbit://5mm_Endmill"))
+        library = cast(ToolBitEndmill, self.assets.get("toolbit://5mm_Endmill"))
+        embedded.obj.Diameter = FreeCAD.Units.Quantity("5 mm")
+        library.obj.Diameter = "4.8"
+
+        changes = diff_tool_geometry(embedded.obj, library.obj)
+
+        self.assertEqual([c.name for c in changes], ["Diameter"])
+
+    def test_same_length_in_other_units_matches(self):
+        embedded = cast(ToolBitEndmill, self.assets.get("toolbit://5mm_Endmill"))
+        library = cast(ToolBitEndmill, self.assets.get("toolbit://5mm_Endmill"))
+        embedded.obj.Diameter = FreeCAD.Units.Quantity("3.175 mm")
+        library.obj.Diameter = FreeCAD.Units.Quantity("0.125 in")
+
+        self.assertEqual(diff_tool_geometry(embedded.obj, library.obj), [])
+
     def test_shape_type_mismatch_is_not_diffed(self):
         embedded = cast(ToolBitEndmill, self.assets.get("toolbit://5mm_Endmill"))
         library = cast(ToolBitEndmill, self.assets.get("toolbit://5mm_Endmill"))
